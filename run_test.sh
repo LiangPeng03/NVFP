@@ -16,10 +16,11 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --quantization_order=default \
     --hadamard_group_size=64 \
     --dataset_name_or_path=c4 \
-    --num_sequences=16 \
+    --num_sequences=128 \
     --gptq \
     --rel_damp=0.01 \
-    --sequence_length=1024 \
+    --sequence_length=2048 \
     --dtype=bfloat16 \
     --fuse_global_scale \
-    --eval_perplexity
+    --eval_perplexity \
+    --amp
