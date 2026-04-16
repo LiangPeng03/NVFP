@@ -125,26 +125,18 @@ def accumulate_hessian(
 
     assert compute_lower_only or not save_lower_only, 'compute_lower_only must be True when save_lower_only is True'
     assert mat_hessian.is_contiguous() and mat_input.is_contiguous()
-    *meta_batch_dims, size_batch, size_hidden = mat_input.shape
-    size_meta_batch: int = int(torch.as_tensor(meta_batch_dims).prod())
-    device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
-    torch_accelerator_module = getattr(torch, device_type)
-    previous_device: torch.device = torch.device(f'{device_type}:{torch_accelerator_module.current_device()}')
-    torch_accelerator_module.set_device(mat_input.device)
-    grid = lambda meta: (
-        size_meta_batch
-        * triton.cdiv(size_hidden, meta['BLOCK_SIZE_M'])
-        * triton.cdiv(size_hidden, meta['BLOCK_SIZE_N']),
-    )
-    # Instead of using a 2D grid, flatten the grid to 1D. This avoids the per-dimension limit.
-    accumulate_hessian_triton_kernel[grid](
-        mat_hessian, mat_input,
-        size_hidden, size_batch,
-        save_lower_only,
-        compute_lower_only,
-        size_meta_batch,
-    )
-    torch_accelerator_module.set_device(previous_device)
+    
+    # PyTorch fallback
+    input_fp32 = mat_input.float()
+    if input_fp32.dim() == 2:
+        input_fp32 = input_fp32.unsqueeze(0)
+    
+    H = torch.bmm(input_fp32.transpose(1, 2), input_fp32)
+    if mat_hessian.dim() == 2:
+        mat_hessian += H.squeeze(0)
+    else:
+        mat_hessian += H
+        
     return mat_hessian
 
 
