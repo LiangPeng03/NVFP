@@ -317,49 +317,7 @@ def gptaq_quantization(
                     export_quantized_model=args.export_quantized_model, alpha=args.alpha
                 )
 
-        # Pass 1: Collect full-precision inputs (X_fp)
-        print("  Collecting fp_inputs...")
-        fp_inputs_cache = {name: [] for name in gptaq_handles.keys()}
-        def fp_hook(name):
-            def _hook(_, inp, out):
-                fp_inputs_cache[name].append(inp[0].detach().cpu())
-            return _hook
-        
-        fp_hooks = []
-        for layer_name, layer in block.named_modules():
-            if isinstance(layer, QLinear):
-                layer._train_mode = False # Disable weight quant
-                fp_hooks.append(layer.register_forward_hook(fp_hook(layer_name)))
-        
-        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
-        for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-            with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
-                block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
-        
-        for h in fp_hooks: h.remove()
-        for layer in block.modules():
-            if isinstance(layer, QLinear): layer._train_mode = True
-
-        # Pass 2: Accumulate H and dXXT (X_quant pass)
-        print("  Accumulating H and dXXT...")
-        hooks = []
-        def update_handle_hook(name):
-            def _hook(_, inp, out):
-                fp_input = fp_inputs_cache[name].pop(0).to(inp[0].device)
-                gptaq_handles[name].update(inp[0], fp_input=fp_input)
-            return _hook
-        
-        for layer_name, layer in block.named_modules():
-            if isinstance(layer, QLinear):
-                hooks.append(layer.register_forward_hook(update_handle_hook(layer_name)))
-
-        for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-            with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
-                block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
-        
-        for h in hooks: h.remove()
-
-        # Transform weights before quantization
+        # Transform weights before quantization (do this before ANY pass)
         block.self_attn.q_proj.weight.data = qkv_in_transform(block.self_attn.q_proj.weight, inv_t=True)
         block.self_attn.k_proj.weight.data = qkv_in_transform(block.self_attn.k_proj.weight, inv_t=True)
         block.self_attn.v_proj.weight.data = qkv_in_transform(block.self_attn.v_proj.weight, inv_t=True)
@@ -372,32 +330,84 @@ def gptaq_quantization(
                 layer._train_mode = False
                 if layer.act_quantizer: layer.act_quantizer._track_global_scale = False
 
-        # Run GPTAQ quantization
-        for layer_name, gptaq_handle in gptaq_handles.items():
-            dequantized_qweight, qweight, scales = gptaq_handle.quantize()
-            orig_weight = gptaq_handle.layer.weight
-            with torch.no_grad():
-                relative_mse_error = get_relative_mse_error(dequantized_qweight.float(), orig_weight.float(), gptaq_handle.H)
-            print(f"[{layer_name:16}]: Relative MSE error: {relative_mse_error.item():.2e}")
-            gptaq_handle.layer.weight.data = dequantized_qweight
+        # Pass 1: Collect full-precision inputs (X_fp)
+        print("  Collecting fp_inputs...")
+        fp_inputs_cache = {name: [] for name in gptaq_handles.keys()}
+        def fp_hook(name):
+            def _hook(_, inp, out):
+                fp_inputs_cache[name].append(inp[0].detach().cpu())
+            return _hook
+        
+        fp_hooks = []
+        for layer_name, layer in block.named_modules():
+            if isinstance(layer, QLinear):
+                fp_hooks.append(layer.register_forward_hook(fp_hook(layer_name)))
+        
+        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
+        for inp_args, inp_kwargs in zip(input_args, input_kwargs):
+            with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
+                block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
+        
+        for h in fp_hooks: h.remove()
+
+        # Pass 2: Sequential Accumulation and Quantization
+        print("  Sequential Accumulation and Quantization...")
+        sequential_groups = [
+            [k for k in gptaq_handles.keys() if k in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj']],
+            [k for k in gptaq_handles.keys() if k == 'self_attn.o_proj'],
+            [k for k in gptaq_handles.keys() if k in ['mlp.gate_proj', 'mlp.up_proj']],
+            [k for k in gptaq_handles.keys() if k == 'mlp.down_proj']
+        ]
+
+        for group in sequential_groups:
+            if not group: continue
+
+            hooks = []
+            def update_handle_hook(name):
+                def _hook(_, inp, out):
+                    fp_input = fp_inputs_cache[name].pop(0).to(inp[0].device)
+                    gptaq_handles[name].update(inp[0], fp_input=fp_input)
+                return _hook
             
-            if args.export_quantized_model:
-                weight_global_scale = gptaq_handle.quantizer.global_scale.to(scales.device)
-                act_global_scale = gptaq_handle.layer.act_quantizer.global_scale
-                transform_matrix = get_transform_matrix(args.transform_class, args.hadamard_group_size, device, orig_dtype).cpu()
-                if args.export_quantized_model == "realquant":
-                    quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
-                        "qweight": pack_fp4_to_uint8(qweight).cpu(),
-                        "scales": cast_scales_to_eXmY(scales * weight_global_scale, args.scale_precision).cpu(),
-                        "forward_hadamard_matrix": transform_matrix, "backward_hadamard_matrix": transform_matrix.clone(),
-                        "weight_global_scale": weight_global_scale.clone(), "act_global_scale": act_global_scale.clone()
-                    }
-                else:
-                    quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
-                        "dqweight": dequantized_qweight.cpu(),
-                        "forward_hadamard_matrix": transform_matrix, "backward_hadamard_matrix": transform_matrix.clone(),
-                        "weight_global_scale": weight_global_scale.clone(), "act_global_scale": act_global_scale.clone()
-                    }
+            for name in group:
+                layer = dict(block.named_modules())[name]
+                hooks.append(layer.register_forward_hook(update_handle_hook(name)))
+
+            for inp_args, inp_kwargs in zip(input_args, input_kwargs):
+                with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
+                    block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
+            
+            for h in hooks: h.remove()
+
+            # Run GPTAQ quantization for the current group
+            for layer_name in group:
+                gptaq_handle = gptaq_handles[layer_name]
+                dequantized_qweight, qweight, scales = gptaq_handle.quantize()
+                orig_weight = gptaq_handle.layer.weight
+                with torch.no_grad():
+                    relative_mse_error = get_relative_mse_error(dequantized_qweight.float(), orig_weight.float(), gptaq_handle.H)
+                print(f"[{layer_name:16}]: Relative MSE error: {relative_mse_error.item():.2e}")
+                
+                # PERMANENTLY update the weight so the next group sees the correctly quantized outputs
+                gptaq_handle.layer.weight.data = dequantized_qweight
+                
+                if args.export_quantized_model:
+                    weight_global_scale = gptaq_handle.quantizer.global_scale.to(scales.device)
+                    act_global_scale = gptaq_handle.layer.act_quantizer.global_scale
+                    transform_matrix = get_transform_matrix(args.transform_class, args.hadamard_group_size, device, orig_dtype).cpu()
+                    if args.export_quantized_model == "realquant":
+                        quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
+                            "qweight": pack_fp4_to_uint8(qweight).cpu(),
+                            "scales": cast_scales_to_eXmY(scales * weight_global_scale, args.scale_precision).cpu(),
+                            "forward_hadamard_matrix": transform_matrix, "backward_hadamard_matrix": transform_matrix.clone(),
+                            "weight_global_scale": weight_global_scale.clone(), "act_global_scale": act_global_scale.clone()
+                        }
+                    else:
+                        quantized_state_dict[f"model.layers.{block_idx}.{layer_name}"] = {
+                            "dqweight": dequantized_qweight.cpu(),
+                            "forward_hadamard_matrix": transform_matrix, "backward_hadamard_matrix": transform_matrix.clone(),
+                            "weight_global_scale": weight_global_scale.clone(), "act_global_scale": act_global_scale.clone()
+                        }
 
         # Update activations for next block
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):

@@ -21,7 +21,7 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --hadamard_group_size=64 \
     --dataset_name_or_path=c4 \
     --num_sequences=128 \
-    --gptq \
+    --gptaq \
     --rel_damp=0.01 \
     --sequence_length=2048 \
     --dtype=bfloat16 \
