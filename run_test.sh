@@ -1,4 +1,8 @@
 #!/bin/bash
+
+gpu_id=1
+export CUDA_VISIBLE_DEVICES=$gpu_id
+
 export OMP_NUM_THREADS=8
 export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128"
 
@@ -13,7 +17,7 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --a_group_size=16 \
     --transform_class=hadamard \
     --w_observer=minmax \
-    --quantization_order=default \
+    --quantization_order=activation \
     --hadamard_group_size=64 \
     --dataset_name_or_path=c4 \
     --num_sequences=128 \
@@ -23,4 +27,3 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --dtype=bfloat16 \
     --fuse_global_scale \
     --eval_perplexity \
-    --amp
