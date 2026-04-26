@@ -6,10 +6,13 @@ export CUDA_VISIBLE_DEVICES=$gpu_id
 export OMP_NUM_THREADS=8
 export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128"
 
-MODEL="HuggingFaceTB/SmolLM2-135M"
+MODEL1="HuggingFaceTB/SmolLM2-135M"
+MODEL2="meta-llama/Llama-2-7b-hf"
+MODEL3="meta-llama/Meta-Llama-3-8B"
+
 
 $HOME/.conda/envs/awq/bin/python model_quant.py \
-    --model_name_or_path=${MODEL} \
+    --model_name_or_path=${MODEL3} \
     --format=nvfp \
     --w_bits=4 \
     --a_bits=16 \
