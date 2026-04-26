@@ -117,6 +117,12 @@ class GPTAQ:
         self.num_samples = 0
         clear_device_cache()
 
+    def free(self) -> None:
+        self.H = None
+        self.dXXT = None
+        torch.cuda.empty_cache()
+        clear_device_cache(garbage_collection=False)
+
     @torch.no_grad()
     def step(self) -> torch.Tensor | Optional[torch.Tensor] | torch.Tensor:
         d_col, block_size, device, dtype = self.d_col, self.block_size, self.W_device, self.W_dtype
@@ -325,32 +331,16 @@ def gptaq_quantization(
         block.mlp.gate_proj.weight.data = gate_up_in_transform(block.mlp.gate_proj.weight, inv_t=True)
         block.mlp.up_proj.weight.data = gate_up_in_transform(block.mlp.up_proj.weight, inv_t=True)
         block.mlp.down_proj.weight.data = down_in_transform(block.mlp.down_proj.weight, inv_t=True)
-        for layer in block.modules():
+        
+        orig_fp_weights = {}
+        quantized_weights = {}
+        for layer_name, layer in block.named_modules():
             if isinstance(layer, QLinear):
+                orig_fp_weights[layer_name] = layer.weight.data.clone().cpu()
+                quantized_weights[layer_name] = layer.weight.data.clone()
                 layer._train_mode = False
                 if layer.act_quantizer: layer.act_quantizer._track_global_scale = False
 
-        # Pass 1: Collect full-precision inputs (X_fp)
-        print("  Collecting fp_inputs...")
-        fp_inputs_cache = {name: [] for name in gptaq_handles.keys()}
-        def fp_hook(name):
-            def _hook(_, inp, out):
-                fp_inputs_cache[name].append(inp[0].detach().cpu())
-            return _hook
-        
-        fp_hooks = []
-        for layer_name, layer in block.named_modules():
-            if isinstance(layer, QLinear):
-                fp_hooks.append(layer.register_forward_hook(fp_hook(layer_name)))
-        
-        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
-        for inp_args, inp_kwargs in zip(input_args, input_kwargs):
-            with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
-                block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
-        
-        for h in fp_hooks: h.remove()
-
-        # Pass 2: Sequential Accumulation and Quantization
         print("  Sequential Accumulation and Quantization...")
         sequential_groups = [
             [k for k in gptaq_handles.keys() if k in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj']],
@@ -359,36 +349,62 @@ def gptaq_quantization(
             [k for k in gptaq_handles.keys() if k == 'mlp.down_proj']
         ]
 
+        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
+
         for group in sequential_groups:
             if not group: continue
 
-            hooks = []
-            def update_handle_hook(name):
+            fp_cache = {}
+            def hook_factory(name):
                 def _hook(_, inp, out):
-                    fp_input = fp_inputs_cache[name].pop(0).to(inp[0].device)
-                    gptaq_handles[name].update(inp[0], fp_input=fp_input)
+                    fp_cache[name] = inp[0].detach()
                 return _hook
-            
-            for name in group:
-                layer = dict(block.named_modules())[name]
-                hooks.append(layer.register_forward_hook(update_handle_hook(name)))
 
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
+                # --- A. Full Precision Pass ---
+                for name, layer in block.named_modules():
+                    if isinstance(layer, QLinear):
+                        layer.weight.data = orig_fp_weights[name].to(device)
+
+                hooks = [dict(block.named_modules())[name].register_forward_hook(hook_factory(name)) for name in group]
+
                 with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
                     block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
-            
-            for h in hooks: h.remove()
+                
+                for h in hooks: h.remove()
+                fp_inputs = {name: fp_cache[name].clone() for name in group} 
 
-            # Run GPTAQ quantization for the current group
+                # --- B. Quantized Pass ---
+                for name, layer in block.named_modules():
+                    if isinstance(layer, QLinear):
+                        layer.weight.data = quantized_weights[name]
+
+                hooks = [dict(block.named_modules())[name].register_forward_hook(hook_factory(name)) for name in group]
+
+                with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
+                    block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
+
+                for h in hooks: h.remove()
+
+                # Accumulate H and dXXT
+                for name in group:
+                    gptaq_handles[name].update(fp_cache[name], fp_input=fp_inputs[name])
+
+            # Quantize the current group
             for layer_name in group:
                 gptaq_handle = gptaq_handles[layer_name]
                 dequantized_qweight, qweight, scales = gptaq_handle.quantize()
-                orig_weight = gptaq_handle.layer.weight
+                
                 with torch.no_grad():
-                    relative_mse_error = get_relative_mse_error(dequantized_qweight.float(), orig_weight.float(), gptaq_handle.H)
+                    relative_mse_error = get_relative_mse_error(
+                        dequantized_qweight.float(), 
+                        orig_fp_weights[layer_name].to(device).float(), 
+                        gptaq_handle.H
+                    )
                 print(f"[{layer_name:16}]: Relative MSE error: {relative_mse_error.item():.2e}")
                 
-                # PERMANENTLY update the weight so the next group sees the correctly quantized outputs
+                # PERMANENTLY update the weights
+                quantized_weights[layer_name] = dequantized_qweight
                 gptaq_handle.layer.weight.data = dequantized_qweight
                 
                 if args.export_quantized_model:
@@ -408,6 +424,8 @@ def gptaq_quantization(
                             "forward_hadamard_matrix": transform_matrix, "backward_hadamard_matrix": transform_matrix.clone(),
                             "weight_global_scale": weight_global_scale.clone(), "act_global_scale": act_global_scale.clone()
                         }
+                
+                gptaq_handle.free()
 
         # Update activations for next block
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):
