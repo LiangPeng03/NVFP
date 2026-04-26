@@ -24,9 +24,10 @@ def get_c4_eval(tokenizer: AutoTokenizer,  sequence_length: int):
         split='validation'
     )
     valenc = tokenizer(' '.join(val_datasetraw[:1100]['text']), return_tensors='pt').input_ids
-    valenc = valenc[:, :(256 * sequence_length)]
+    num_seqs = min(valenc.numel() // sequence_length, 256)
+    valenc = valenc[:, :(num_seqs * sequence_length)]
     test_loader = []
-    for i in range(256):
+    for i in range(num_seqs):
         test_loader.append(valenc[:, i * sequence_length : (i + 1) * sequence_length])
     return test_loader
 
