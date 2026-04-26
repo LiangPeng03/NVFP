@@ -42,6 +42,15 @@ def auto_or_int(value):
         raise argparse.ArgumentTypeError(f"Must be 'auto' or an integer, got '{value}'")
 
 
+def auto_or_float(value):
+    if value == "auto":
+        return value
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Must be 'auto' or a float, got '{value}'")
+
+
 def export_quantized_model(model, quantized_state_dict, non_quantized_state_dict, args):
     config = model.config
     # Prepare directory to save model
@@ -239,6 +248,18 @@ def parse_args():
         help="Weigth quantization order in GPTQ.",
     )
     parser.add_argument("--rel_damp", type=float, default=1e-2)
+    # GPTAQ params
+    parser.add_argument(
+        "--gptaq",
+        action="store_true",
+        help="Run GPTAQ quantization.",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=auto_or_float,
+        default="auto",
+        help="Correction term alpha for GPTAQ (auto or float).",
+    )
     # Transform params
     parser.add_argument(
         "--transform_class",
@@ -395,7 +416,10 @@ def main():
     )
 
     if quantize_anything:
-        if args.gptq:
+        if args.gptaq:
+            from src.quantization import gptaq_quantization
+            quantized_state_dict, non_quantized_state_dict = gptaq_quantization(model, calibration_data, args, device)
+        elif args.gptq:
             quantized_state_dict, non_quantized_state_dict = gptq_quantization(model, calibration_data, args, device)
         else:
             quantized_state_dict, non_quantized_state_dict = rtn_quantization(model, calibration_data, args, device)
