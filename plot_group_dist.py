@@ -6,11 +6,18 @@ import seaborn as sns
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM
 
+try:
+    from fast_hadamard_transform import hadamard_transform
+except ImportError:
+    hadamard_transform = None
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model directory (HF or safetensors)")
     parser.add_argument("--layers", type=str, default="0,14,29", help="Comma separated list of layers to analyze")
     parser.add_argument("--group_size", type=int, default=16, help="Group size for analysis")
+    parser.add_argument("--hadamard", action="store_true", help="Apply Hadamard transform to weights before analysis")
+    parser.add_argument("--hadamard_group_size", type=int, default=128, help="Group size for Hadamard transform")
     parser.add_argument("--save_dir", type=str, default="./dist_plots", help="Directory to save plots")
     return parser.parse_args()
 
@@ -74,6 +81,23 @@ def main():
                 print(f"  Missing {mod} in layer {layer_idx}")
                 continue
                 
+            # Apply Hadamard if requested
+            if args.hadamard:
+                if hadamard_transform is None:
+                    print("  Error: fast_hadamard_transform not installed. Skipping rotation.")
+                else:
+                    # Hadamard is applied to the input dimension (dim=-1)
+                    # We need to reshape to [..., hadamard_group_size]
+                    h_gs = args.hadamard_group_size
+                    orig_shape = w_tensor.shape
+                    if orig_shape[-1] % h_gs == 0:
+                        w_tensor = hadamard_transform(
+                            w_tensor.view(-1, h_gs), 
+                            scale=1.0 / math.sqrt(h_gs)
+                        ).view(orig_shape)
+                    else:
+                        print(f"  Warning: {mod} in_features ({orig_shape[-1]}) not divisible by {h_gs}. Skipping rotation.")
+
             # Grouping
             # Shape: [out_features, in_features]
             # Flatten to [num_groups, group_size]
