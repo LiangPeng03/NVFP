@@ -23,24 +23,28 @@ def parse_args():
 
 def load_weights(model_path):
     print(f"Loading weights from {model_path}...")
+    
+    # 1. Try to load as HF model (works for local paths and Hub IDs)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True, trust_remote_code=True)
+        return model.state_dict()
+    except Exception as e:
+        print(f"  HF from_pretrained failed, trying manual loading: {e}")
+
+    # 2. Manual loading for specific files or local directories
     if os.path.isdir(model_path):
-        # Try to load as HF model
-        try:
-            model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-            return model.state_dict()
-        except:
-            # Fallback to safetensors loading if multiple exist
-            state_dict = {}
-            for file in os.listdir(model_path):
-                if file.endswith(".safetensors"):
-                    state_dict.update(load_file(os.path.join(model_path, file)))
-            return state_dict
-    elif model_path.endswith(".safetensors"):
+        state_dict = {}
+        for file in os.listdir(model_path):
+            if file.endswith(".safetensors"):
+                state_dict.update(load_file(os.path.join(model_path, file)))
+        if state_dict: return state_dict
+        
+    if model_path.endswith(".safetensors"):
         return load_file(model_path)
     elif model_path.endswith(".pt") or model_path.endswith(".bin"):
         return torch.load(model_path, map_location="cpu")
-    else:
-        raise ValueError("Unsupported model format")
+    
+    raise ValueError(f"Could not load model from {model_path}. Please ensure it is a valid path or HF ID.")
 
 def main():
     args = parse_args()
