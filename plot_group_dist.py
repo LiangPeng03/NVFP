@@ -20,7 +20,6 @@ def parse_args():
     parser.add_argument("--group_size", type=int, default=16, help="Group size for analysis")
     parser.add_argument("--hadamard", action="store_true", help="Apply Hadamard transform to weights before analysis")
     parser.add_argument("--hadamard_group_size", type=int, default=128, help="Group size for Hadamard transform")
-    parser.add_argument("--pseudo_quantize", action="store_true", help="Apply MXFP4/NVFP4 pseudo-quantization (RTN) to weights")
     parser.add_argument("--save_dir", type=str, default="./dist_plots", help="Directory to save plots")
     return parser.parse_args()
 
@@ -49,13 +48,8 @@ def load_weights(model_path):
     
     raise ValueError(f"Could not load model from {model_path}. Please ensure it is a valid path or HF ID.")
 
-def main():
-    args = parse_args()
-    os.makedirs(args.save_dir, exist_ok=True)
-    
-    state_dict = load_weights(args.model_path)
-    layers_to_analyze = [int(x) for x in args.layers.split(",")]
-    
+def plot_distributions(state_dict, layers_to_analyze, group_size, hadamard, hadamard_group_size, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
     modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     
     # Check if weights are stored directly or as qweight + scales
@@ -89,13 +83,13 @@ def main():
                 continue
                 
             # Apply Hadamard if requested
-            if args.hadamard:
+            if hadamard:
                 if hadamard_transform is None:
                     print("  Error: fast_hadamard_transform not installed. Skipping rotation.")
                 else:
                     # Hadamard is applied to the input dimension (dim=-1)
                     # We need to reshape to [..., hadamard_group_size]
-                    h_gs = args.hadamard_group_size
+                    h_gs = hadamard_group_size
                     orig_shape = w_tensor.shape
                     if orig_shape[-1] % h_gs == 0:
                         w_tensor = hadamard_transform(
@@ -103,36 +97,18 @@ def main():
                             scale=1.0 / math.sqrt(h_gs)
                         ).view(orig_shape).cpu()
                     else:
-            # Apply pseudo-quantization if requested
-            if args.pseudo_quantize:
-                import sys
-                sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-                from src.quantization.quantizer import Quantizer
-                # Format is NVFP (or MXFP) 4-bit, group size 16
-                quantizer = Quantizer(
-                    bits=4,
-                    symmetric=True,
-                    format="nvfp",
-                    granularity="group",
-                    observer="minmax",
-                    dim=-1,
-                    group_size=16,
-                    scale_precision="fp16",
-                )
-                w_tensor = w_tensor.cuda()
-                scales, zeros = quantizer.get_quantization_params(w_tensor)
-                w_tensor = quantizer(w_tensor, scales, zeros).cpu()
+                        print(f"  Warning: {mod} in_features ({orig_shape[-1]}) not divisible by {h_gs}. Skipping rotation.")
 
             # Grouping
             # Shape: [out_features, in_features]
             # Flatten to [num_groups, group_size]
             num_elements = w_tensor.numel()
-            if num_elements % args.group_size != 0:
-                print(f"  Warning: {mod} elements ({num_elements}) not divisible by group_size {args.group_size}")
+            if num_elements % group_size != 0:
+                print(f"  Warning: {mod} elements ({num_elements}) not divisible by group_size {group_size}")
                 # Trim to divisible
-                w_tensor = w_tensor.flatten()[: (num_elements // args.group_size) * args.group_size]
+                w_tensor = w_tensor.flatten()[: (num_elements // group_size) * group_size]
                 
-            w_grouped = w_tensor.view(-1, args.group_size)
+            w_grouped = w_tensor.view(-1, group_size)
             
             # Calculate Mean, Std, Skewness, and Kurtosis
             group_means = w_grouped.mean(dim=1)
@@ -176,10 +152,23 @@ def main():
             ax_kurt.axvline(0, color='red', linestyle='--') # Mark 0
             
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        save_path = os.path.join(args.save_dir, f"layer_{layer_idx}_dist.png")
+        save_path = os.path.join(save_dir, f"layer_{layer_idx}_dist.png")
         plt.savefig(save_path, dpi=300)
-        plt.close()
+        plt.close(fig)
         print(f"Saved plot to {save_path}")
+
+def main():
+    args = parse_args()
+    state_dict = load_weights(args.model_path)
+    layers_to_analyze = [int(x) for x in args.layers.split(",")]
+    plot_distributions(
+        state_dict=state_dict,
+        layers_to_analyze=layers_to_analyze,
+        group_size=args.group_size,
+        hadamard=args.hadamard,
+        hadamard_group_size=args.hadamard_group_size,
+        save_dir=args.save_dir
+    )
 
 if __name__ == "__main__":
     main()

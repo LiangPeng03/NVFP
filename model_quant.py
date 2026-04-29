@@ -22,6 +22,7 @@ from src.quantization.qconfig import prepare_quantization_config
 from src.quantization import rtn_quantization, gptq_quantization
 from src.utils.common_utils import fix_seed
 from src.utils.data_utils import get_data, get_wikitext2, get_c4_eval
+from plot_group_dist import plot_distributions
 
 try:
     import wandb
@@ -298,10 +299,11 @@ def parse_args():
     parser.add_argument("--amp", action="store_true", help="whether to enable fp16 autocasting.")
     parser.add_argument("--compile", action="store_true", help="whether to use torch.compile.")
     parser.add_argument("--fuse_global_scale", action="store_true", help="whether to fuse global scale in qkv and gate_up.")
-    # Eval params
-    parser.add_argument("--eval_perplexity", action="store_true", help="whether to eval perplexity after quantization.")
-    parser.add_argument("--eval_openllm", action="store_true", help="whether to eval OpenLLM v1 openllm after quantization.")
-    # LM eval params
+    # Eval
+    parser.add_argument("--eval_perplexity", action="store_true", help="Evaluate perplexity on wikitext-2 and c4.")
+    parser.add_argument("--eval_openllm", action="store_true", help="Evaluate using OpenLLM v1.")
+    parser.add_argument("--plot", action="store_true", help="Plot group weight distributions after pseudo-quantization.")
+    parser.add_argument("--lm_eval_tasks", type=str, default="winogrande,hellaswag", help="Comma separated list of LM Eval tasks.")
     parser.add_argument(
         "--lm_eval_batch_size",
         type=auto_or_int,
@@ -427,6 +429,21 @@ def main():
         if args.export_quantized_model:
             export_quantized_model(model, quantized_state_dict, non_quantized_state_dict, args) 
             tokenizer.save_pretrained(args.save_path)
+            
+        if args.plot:
+            print("Plotting pseudo-quantized weight distributions...")
+            layers_to_analyze = [0, model.config.num_hidden_layers // 2, model.config.num_hidden_layers - 1]
+            
+            # Use quantized_state_dict if it has the pseudo-quantized weights. 
+            # Or use model.state_dict() directly since the model was modified in place.
+            plot_distributions(
+                state_dict=model.state_dict(),
+                layers_to_analyze=layers_to_analyze,
+                group_size=args.w_group_size,
+                hadamard=False, # Already rotated during quantization
+                hadamard_group_size=args.hadamard_group_size if hasattr(args, 'hadamard_group_size') else 128,
+                save_dir=args.save_path if args.save_path else "./dist_plots_quantized"
+            )
 
     if args.compile:
         model = torch.compile(model)
