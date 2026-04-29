@@ -153,10 +153,10 @@ class Quantizer:
                         raise ValueError(f"Global scale is not finite: {self.global_scale}\n")
                     
                 # Clamp, convert to fp8, convert back, and rescale in one chain
-                scales = (scales * self.global_scale).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX) \
+                scales = (scales * self.global_scale.to(x.device)).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX) \
                     .to(torch.float8_e4m3fn) \
                     .to(torch.float32) \
-                    .mul(get_reciprocal(self.global_scale)) \
+                    .mul(get_reciprocal(self.global_scale.to(x.device))) \
                     .to(x.dtype)
         
         elif self.scale_precision == ScalePrecision.E8M0:

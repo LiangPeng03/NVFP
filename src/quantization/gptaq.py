@@ -339,7 +339,7 @@ def gptaq_quantization(
                 orig_fp_weights[layer_name] = layer.weight.data.clone().cpu()
                 quantized_weights[layer_name] = layer.weight.data.clone()
                 layer._train_mode = False
-                if layer.act_quantizer: layer.act_quantizer._track_global_scale = False
+                # if layer.act_quantizer: layer.act_quantizer._track_global_scale = False
 
         print("  Sequential Accumulation and Quantization...")
         sequential_groups = [
@@ -426,6 +426,10 @@ def gptaq_quantization(
                         }
                 
                 gptaq_handle.free()
+        # Freeze global scale tracking after quantization is complete
+        for layer_name, layer in block.named_modules():
+            if isinstance(layer, QLinear):
+                if layer.act_quantizer: layer.act_quantizer._track_global_scale = False        
 
         # Update activations for next block
         for inp_args, inp_kwargs in zip(input_args, input_kwargs):
