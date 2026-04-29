@@ -61,7 +61,7 @@ def plot_distributions(state_dict, layers_to_analyze, group_size, hadamard, hada
         
         # Prepare subplots: 4 rows (Mean, Std, Skew, Kurt), len(modules) columns
         fig, axes = plt.subplots(4, len(modules), figsize=(4 * len(modules), 20))
-        fig.suptitle(f"Group Distribution (Size={args.group_size}) - Layer {layer_idx}", fontsize=16)
+        fig.suptitle(f"Group Distribution (Size={group_size}) - Layer {layer_idx}", fontsize=16)
         
         for col, mod in enumerate(modules):
             # Attempt to find the weight tensor

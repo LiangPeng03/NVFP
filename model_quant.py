@@ -303,7 +303,6 @@ def parse_args():
     parser.add_argument("--eval_perplexity", action="store_true", help="Evaluate perplexity on wikitext-2 and c4.")
     parser.add_argument("--eval_openllm", action="store_true", help="Evaluate using OpenLLM v1.")
     parser.add_argument("--plot", action="store_true", help="Plot group weight distributions after pseudo-quantization.")
-    parser.add_argument("--lm_eval_tasks", type=str, default="winogrande,hellaswag", help="Comma separated list of LM Eval tasks.")
     parser.add_argument(
         "--lm_eval_batch_size",
         type=auto_or_int,
