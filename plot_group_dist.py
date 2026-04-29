@@ -3,6 +3,8 @@ import argparse
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
+import math
+
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM
 
@@ -26,7 +28,7 @@ def load_weights(model_path):
     
     # 1. Try to load as HF model (works for local paths and Hub IDs)
     try:
-        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True, trust_remote_code=True, device_map="cuda")
         return model.state_dict()
     except Exception as e:
         print(f"  HF from_pretrained failed, trying manual loading: {e}")
@@ -62,8 +64,8 @@ def main():
     for layer_idx in layers_to_analyze:
         print(f"Analyzing Layer {layer_idx}...")
         
-        # Prepare subplots: 2 rows (Mean, Std), len(modules) columns
-        fig, axes = plt.subplots(2, len(modules), figsize=(4 * len(modules), 10))
+        # Prepare subplots: 3 rows (Mean, Std, Skew), len(modules) columns
+        fig, axes = plt.subplots(3, len(modules), figsize=(4 * len(modules), 15))
         fig.suptitle(f"Group Distribution (Size={args.group_size}) - Layer {layer_idx}", fontsize=16)
         
         for col, mod in enumerate(modules):
@@ -96,9 +98,9 @@ def main():
                     orig_shape = w_tensor.shape
                     if orig_shape[-1] % h_gs == 0:
                         w_tensor = hadamard_transform(
-                            w_tensor.view(-1, h_gs), 
+                            w_tensor.view(-1, h_gs).cuda(), 
                             scale=1.0 / math.sqrt(h_gs)
-                        ).view(orig_shape)
+                        ).view(orig_shape).cpu()
                     else:
                         print(f"  Warning: {mod} in_features ({orig_shape[-1]}) not divisible by {h_gs}. Skipping rotation.")
 
@@ -113,9 +115,15 @@ def main():
                 
             w_grouped = w_tensor.view(-1, args.group_size)
             
-            # Calculate Mean and Std
-            group_means = w_grouped.mean(dim=1).cpu().numpy()
-            group_stds = w_grouped.std(dim=1).cpu().numpy()
+            # Calculate Mean, Std, and Skewness
+            group_means = w_grouped.mean(dim=1)
+            group_stds = w_grouped.std(dim=1)
+            # skewness = E[(X - μ)^3] / σ^3
+            group_skews = ((w_grouped - group_means.unsqueeze(1)) ** 3).mean(dim=1) / (group_stds ** 3 + 1e-8)
+            
+            group_means = group_means.cpu().numpy()
+            group_stds = group_stds.cpu().numpy()
+            group_skews = group_skews.cpu().numpy()
             
             # Plot Mean Distribution (Density)
             ax_mean = axes[0, col]
@@ -129,6 +137,13 @@ def main():
             sns.kdeplot(group_stds, ax=ax_std, fill=True, color="green")
             ax_std.set_title(f"Group Stds")
             ax_std.set_xlabel("Std")
+            
+            # Plot Skewness Distribution (Density)
+            ax_skew = axes[2, col]
+            sns.kdeplot(group_skews, ax=ax_skew, fill=True, color="orange")
+            ax_skew.set_title(f"Group Skews")
+            ax_skew.set_xlabel("Skewness")
+            ax_skew.axvline(0, color='red', linestyle='--') # Mark 0
             
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         save_path = os.path.join(args.save_dir, f"layer_{layer_idx}_dist.png")
