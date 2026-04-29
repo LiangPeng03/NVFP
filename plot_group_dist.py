@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--group_size", type=int, default=16, help="Group size for analysis")
     parser.add_argument("--hadamard", action="store_true", help="Apply Hadamard transform to weights before analysis")
     parser.add_argument("--hadamard_group_size", type=int, default=128, help="Group size for Hadamard transform")
+    parser.add_argument("--pseudo_quantize", action="store_true", help="Apply MXFP4/NVFP4 pseudo-quantization (RTN) to weights")
     parser.add_argument("--save_dir", type=str, default="./dist_plots", help="Directory to save plots")
     return parser.parse_args()
 
@@ -102,7 +103,25 @@ def main():
                             scale=1.0 / math.sqrt(h_gs)
                         ).view(orig_shape).cpu()
                     else:
-                        print(f"  Warning: {mod} in_features ({orig_shape[-1]}) not divisible by {h_gs}. Skipping rotation.")
+            # Apply pseudo-quantization if requested
+            if args.pseudo_quantize:
+                import sys
+                sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+                from src.quantization.quantizer import Quantizer
+                # Format is NVFP (or MXFP) 4-bit, group size 16
+                quantizer = Quantizer(
+                    bits=4,
+                    symmetric=True,
+                    format="nvfp",
+                    granularity="group",
+                    observer="minmax",
+                    dim=-1,
+                    group_size=16,
+                    scale_precision="fp16",
+                )
+                w_tensor = w_tensor.cuda()
+                scales, zeros = quantizer.get_quantization_params(w_tensor)
+                w_tensor = quantizer(w_tensor, scales, zeros).cpu()
 
             # Grouping
             # Shape: [out_features, in_features]
