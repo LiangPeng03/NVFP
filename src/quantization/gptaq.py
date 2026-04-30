@@ -41,6 +41,7 @@ class GPTAQ:
         rel_damp: float = 1e-2,
         export_quantized_model: str = "",
         alpha: str = "auto",
+        alpha_mean_penalty: Optional[float] = None,
     ):
         assert isinstance(layer, (nn.Linear, _ConvNd)), "GPTAQ supports only linear and convolutional layers."
         self.layer = layer
@@ -52,6 +53,7 @@ class GPTAQ:
         self.block_size = block_size
         self.rel_damp = rel_damp
         self.alpha = alpha
+        self.alpha_mean_penalty = alpha_mean_penalty
         # Backup layer properties
         self.W_device = self.W.device
         self.W_dtype = self.W.dtype
@@ -145,8 +147,10 @@ class GPTAQ:
         if self.quantization_order == QuantizationOrder.ACTIVATION:
             perm = torch.argsort(self.H.diag(), descending=True)
             group_idx = torch.arange(num_groups, device=device).repeat_interleave(group_size)[perm]
+            permuted_group_idx = group_idx
         else:
             perm = torch.arange(d_col, device=device)
+            permuted_group_idx = torch.arange(d_col, device=device) // group_size
         perm_inv = torch.argsort(perm)
         
         H = self.H[perm][:, perm]
@@ -183,6 +187,12 @@ class GPTAQ:
         else:
             P = None
 
+        if self.alpha_mean_penalty is not None:
+            group_sums = torch.zeros((self.d_row, num_groups), device=device, dtype=dtype)
+            group_sums.index_add_(1, permuted_group_idx, w)
+        else:
+            group_sums = None
+
         for c1 in range(0, d_col, block_size):
             c2 = min(c1 + block_size, d_col)
             ncols = c2 - c1
@@ -195,7 +205,7 @@ class GPTAQ:
             for i in range(ncols):
                 w_ci = w_blk[:, i]
                 d = H_inv_cho_blk[i, i]
-                g_idx = group_idx[c1 + i] if self.quantization_order == QuantizationOrder.ACTIVATION else (c1 + i) // group_size    
+                g_idx = permuted_group_idx[c1 + i]
                 
                 if self.export_quantized_model:
                     q = self.quantizer.quantize(w_ci, scales[:, g_idx], zeros[:, g_idx])
@@ -205,18 +215,50 @@ class GPTAQ:
                     w_q = self.quantizer(w_ci, scales[:, g_idx], zeros[:, g_idx])
                 w[:, c1 + i] = w_q
                 
+                if group_sums is not None:
+                    group_sums[:, g_idx] += (w_q - w_ci)
+                
                 err = (w_ci - w_q) / d
                 # Weight update with P correction
                 if P is not None:
-                    w_blk[:, i:] -= err.unsqueeze(1).matmul(H_inv_cho_blk[i, i:].unsqueeze(0)) - w_ci.unsqueeze(1).matmul(P_blk[i, i:].unsqueeze(0))
+                    comp = w_ci.unsqueeze(1).matmul(P_blk[i, i:].unsqueeze(0))
+                    if group_sums is not None and i + 1 < ncols:
+                        g_cols = permuted_group_idx[c1 + i + 1: c2]
+                        current_sums = group_sums[:, g_cols]
+                        comp_rest = comp[:, 1:]
+                        penalty_mask = (current_sums * comp_rest) > 0
+                        comp[:, 1:] = torch.where(penalty_mask, comp_rest * self.alpha_mean_penalty, comp_rest)
+                        
+                    update = err.unsqueeze(1).matmul(H_inv_cho_blk[i, i:].unsqueeze(0)) - comp
+                    w_blk[:, i:] -= update
+                    if group_sums is not None and i + 1 < ncols:
+                        group_sums.index_add_(1, g_cols, -update[:, 1:])
                 else:
-                    w_blk[:, i:].addr_(err, H_inv_cho_blk[i, i:], alpha=-1)
+                    update = err.unsqueeze(1).matmul(H_inv_cho_blk[i, i:].unsqueeze(0))
+                    w_blk[:, i:] -= update
+                    if group_sums is not None and i + 1 < ncols:
+                        g_cols = permuted_group_idx[c1 + i + 1: c2]
+                        group_sums.index_add_(1, g_cols, -update[:, 1:])
                 errs[:, i] = err
                 
             if P is not None:
-                w[:, c2:] -= errs.matmul(H_inv_cho[c1:c2, c2:]) - w_blk.matmul(P[c1:c2, c2:])
+                comp_block = w_blk.matmul(P[c1:c2, c2:])
+                if group_sums is not None and c2 < d_col:
+                    g_cols_block = permuted_group_idx[c2:]
+                    current_sums_block = group_sums[:, g_cols_block]
+                    penalty_mask_block = (current_sums_block * comp_block) > 0
+                    comp_block = torch.where(penalty_mask_block, comp_block * self.alpha_mean_penalty, comp_block)
+                
+                update_block = errs.matmul(H_inv_cho[c1:c2, c2:]) - comp_block
+                w[:, c2:] -= update_block
+                if group_sums is not None and c2 < d_col:
+                    group_sums.index_add_(1, g_cols_block, -update_block)
             else:
-                w[:, c2:].addmm_(errs, H_inv_cho[c1:c2, c2:], alpha=-1)
+                update_block = errs.matmul(H_inv_cho[c1:c2, c2:])
+                w[:, c2:] -= update_block
+                if group_sums is not None and c2 < d_col:
+                    g_cols_block = permuted_group_idx[c2:]
+                    group_sums.index_add_(1, g_cols_block, -update_block)
 
         w = w[:, perm_inv].contiguous()
         if qweight is not None:
@@ -320,7 +362,8 @@ def gptaq_quantization(
                 gptaq_handles[layer_name] = GPTAQ(
                     layer, Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None, 
                     quantization_order=args.quantization_order, rel_damp=args.rel_damp,
-                    export_quantized_model=args.export_quantized_model, alpha=args.alpha
+                    export_quantized_model=args.export_quantized_model, alpha=args.alpha,
+                    alpha_mean_penalty=args.alpha_mean_penalty
                 )
 
         # Transform weights before quantization (do this before ANY pass)

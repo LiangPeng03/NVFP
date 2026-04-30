@@ -261,6 +261,12 @@ def parse_args():
         default="auto",
         help="Correction term alpha for GPTAQ (auto or float).",
     )
+    parser.add_argument(
+        "--alpha_mean_penalty",
+        type=float,
+        default=None,
+        help="Penalty factor for GPTAQ compensation if it exacerbates mean shift. (0-1, e.g. 0.5)",
+    )
     # Transform params
     parser.add_argument(
         "--transform_class",
