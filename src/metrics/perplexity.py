@@ -9,7 +9,7 @@ def compute_perplexity(model, data, batch_size: int = 1):
     num_samples = len(data)
     device = next(model.parameters()).device
     # Running estimate of negative log-likelihood
-    nll_running = 0
+    nll_running = torch.tensor(0.0, dtype=torch.float32, device=device)
     # Number of tokens processed to far
     tokens_processed = 0
     # Loop through each batch
