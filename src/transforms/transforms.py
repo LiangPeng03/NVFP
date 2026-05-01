@@ -54,14 +54,15 @@ class PermutationTransform(BaseTransform):
     def __init__(self, perm_idx: torch.Tensor):
         super().__init__()
         self.register_buffer("perm_idx", perm_idx)
-        self.register_buffer("inv_perm_idx", torch.argsort(perm_idx))
 
     def forward(self, x: torch.Tensor, inv_t: bool = False, dim: int = -1):
         if dim == -1:
             dim = x.ndim - 1
         
-        idx = self.inv_perm_idx if inv_t else self.perm_idx
-        return torch.index_select(x, dim, idx)
+        # M is a permutation matrix (which is orthogonal).
+        # For orthogonal matrices, M^{-T} = (M^T)^{-T} = M.
+        # Thus, we apply the exact same permutation for both forward and inv_t passes.
+        return torch.index_select(x, dim, self.perm_idx)
     
     def remove_parametrizations(self) -> None:
         pass
