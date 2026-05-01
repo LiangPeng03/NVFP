@@ -308,10 +308,52 @@ def gptaq_quantization(
         if args.cpu_offload_modules:
             block.to(device)
 
+        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
+
+        act_means = {}
+        if getattr(args, "channel_sorting", False):
+            def hook_factory(name):
+                def _hook(_, inp, out):
+                    mean_val = inp[0].detach().mean(dim=(0, 1))
+                    if name not in act_means:
+                        act_means[name] = mean_val
+                    else:
+                        act_means[name] = (act_means[name] + mean_val) / 2
+                return _hook
+            
+            hooks = []
+            hooks.append(block.self_attn.q_proj.register_forward_hook(hook_factory("qkv")))
+            hooks.append(block.mlp.gate_proj.register_forward_hook(hook_factory("gate_up")))
+            
+            for inp_args, inp_kwargs in zip(input_args, input_kwargs):
+                with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
+                    block(*to(inp_args, device=device), **to(inp_kwargs, device=device))
+            
+            for h in hooks:
+                h.remove()
+
+        def get_balanced_perm(mean_vals, group_size):
+            sorted_idx = torch.argsort(mean_vals)
+            D = len(mean_vals)
+            G = group_size
+            num_groups = D // G
+            matrix_idx = sorted_idx.view(G, num_groups)
+            for i in range(1, G, 2):
+                matrix_idx[i] = matrix_idx[i].flip(dims=[0])
+            return matrix_idx.t().flatten()
+
         qkv_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         o_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         gate_up_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         down_in_transform = build_transform(args.transform_class, size=model.config.intermediate_size, **transform_kwargs)     
+
+        if getattr(args, "channel_sorting", False):
+            from ..transforms.transforms import CompositeTransform, PermutationTransform
+            qkv_perm = get_balanced_perm(act_means["qkv"], args.hadamard_group_size)
+            qkv_in_transform = CompositeTransform([PermutationTransform(qkv_perm), qkv_in_transform])
+            
+            gate_up_perm = get_balanced_perm(act_means["gate_up"], args.hadamard_group_size)
+            gate_up_in_transform = CompositeTransform([PermutationTransform(gate_up_perm), gate_up_in_transform])
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
@@ -368,8 +410,6 @@ def gptaq_quantization(
             [k for k in gptaq_handles.keys() if k in ['mlp.gate_proj', 'mlp.up_proj']],
             [k for k in gptaq_handles.keys() if k == 'mlp.down_proj']
         ]
-
-        device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
 
         for group in sequential_groups:
             if not group: continue

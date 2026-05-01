@@ -50,6 +50,23 @@ class IdentityTransform(BaseTransform):
         pass
 
 
+class PermutationTransform(BaseTransform):
+    def __init__(self, perm_idx: torch.Tensor):
+        super().__init__()
+        self.register_buffer("perm_idx", perm_idx)
+        self.register_buffer("inv_perm_idx", torch.argsort(perm_idx))
+
+    def forward(self, x: torch.Tensor, inv_t: bool = False, dim: int = -1):
+        if dim == -1:
+            dim = x.ndim - 1
+        
+        idx = self.inv_perm_idx if inv_t else self.perm_idx
+        return torch.index_select(x, dim, idx)
+    
+    def remove_parametrizations(self) -> None:
+        pass
+
+
 class FullTransform(BaseTransform):
 
     def __init__(
@@ -166,7 +183,8 @@ class CompositeTransform(BaseTransform):
         self.transforms = nn.ModuleList(transforms)
 
     def forward(self, x: torch.Tensor, inv_t: bool = False, dim: int = -1):
-        for transform in self.transforms:
+        transforms = reversed(self.transforms) if inv_t else self.transforms
+        for transform in transforms:
             x = transform(x, inv_t, dim)
         return x
     

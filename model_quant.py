@@ -275,6 +275,11 @@ def parse_args():
     )
     # Transform params
     parser.add_argument(
+        "--channel_sorting",
+        action="store_true",
+        help="Enable mean-complementary channel sorting before transformations.",
+    )
+    parser.add_argument(
         "--transform_class",
         type=str,
         default="identity",
