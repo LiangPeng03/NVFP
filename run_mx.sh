@@ -32,5 +32,5 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --amp \
     --eval_perplexity \
     --alpha=1 \
-    --RTM=0.05 \
+    --channel_sorting \
     # --plot

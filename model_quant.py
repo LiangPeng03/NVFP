@@ -267,12 +267,6 @@ def parse_args():
         default="auto",
         help="Correction term alpha for GPTAQ (auto or float).",
     )
-    parser.add_argument(
-        "--RTM",
-        type=float,
-        default=None,
-        help="Round-to-mean (RTM) penalty lambda to alleviate mean shift (e.g., 0.1).",
-    )
     # Transform params
     parser.add_argument(
         "--channel_sorting",

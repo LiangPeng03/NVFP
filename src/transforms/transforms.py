@@ -184,8 +184,7 @@ class CompositeTransform(BaseTransform):
         self.transforms = nn.ModuleList(transforms)
 
     def forward(self, x: torch.Tensor, inv_t: bool = False, dim: int = -1):
-        transforms = reversed(self.transforms) if inv_t else self.transforms
-        for transform in transforms:
+        for transform in self.transforms:
             x = transform(x, inv_t, dim)
         return x
     

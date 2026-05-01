@@ -41,7 +41,6 @@ class GPTAQ:
         rel_damp: float = 1e-2,
         export_quantized_model: str = "",
         alpha: str = "auto",
-        rtm_lambda: Optional[float] = None,
     ):
         assert isinstance(layer, (nn.Linear, _ConvNd)), "GPTAQ supports only linear and convolutional layers."
         self.layer = layer
@@ -53,7 +52,6 @@ class GPTAQ:
         self.block_size = block_size
         self.rel_damp = rel_damp
         self.alpha = alpha
-        self.rtm_lambda = rtm_lambda
         # Backup layer properties
         self.W_device = self.W.device
         self.W_dtype = self.W.dtype
@@ -187,11 +185,6 @@ class GPTAQ:
         else:
             P = None
 
-        if self.rtm_lambda is not None:
-            group_sums = torch.zeros((self.d_row, num_groups), device=device, dtype=dtype)
-        else:
-            group_sums = None
-
         for c1 in range(0, d_col, block_size):
             c2 = min(c1 + block_size, d_col)
             ncols = c2 - c1
@@ -206,23 +199,13 @@ class GPTAQ:
                 d = H_inv_cho_blk[i, i]
                 g_idx = permuted_group_idx[c1 + i]
                 
-                w_ci_shifted = w_ci
-                if group_sums is not None:
-                    current_err = group_sums[:, g_idx]
-                    d_sq = d ** 2
-                    shift = (self.rtm_lambda * d_sq) / (1 + self.rtm_lambda * d_sq) * current_err
-                    w_ci_shifted = w_ci - shift
-                
                 if self.export_quantized_model:
-                    q = self.quantizer.quantize(w_ci_shifted, scales[:, g_idx], zeros[:, g_idx])
+                    q = self.quantizer.quantize(w_ci, scales[:, g_idx], zeros[:, g_idx])
                     w_q = self.quantizer.dequantize(q, scales[:, g_idx], zeros[:, g_idx])
                     qweight[:, c1 + i] = q
                 else:
-                    w_q = self.quantizer(w_ci_shifted, scales[:, g_idx], zeros[:, g_idx])
+                    w_q = self.quantizer(w_ci, scales[:, g_idx], zeros[:, g_idx])
                 w[:, c1 + i] = w_q
-                
-                if group_sums is not None:
-                    group_sums[:, g_idx] += (w_q - w_ci)
                 
                 err = (w_ci - w_q) / d
                 # Weight update with P correction
@@ -382,7 +365,6 @@ def gptaq_quantization(
                     layer, Quantizer(**weight_quantizer_kwargs) if weight_quantizer_kwargs else None, 
                     quantization_order=args.quantization_order, rel_damp=args.rel_damp,
                     export_quantized_model=args.export_quantized_model, alpha=args.alpha,
-                    rtm_lambda=args.RTM
                 )
 
         # Transform weights before quantization (do this before ANY pass)
