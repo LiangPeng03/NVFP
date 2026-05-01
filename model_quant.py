@@ -161,6 +161,12 @@ def parse_args():
         type=int, 
         help="Number of calibration sequences."
     )
+    parser.add_argument(
+        "--calib_batch_size", 
+        default=1, 
+        type=int, 
+        help="Batch size for calibration. Increase this to speed up quantization and increase GPU utilization."
+    )
     # Quantization params
     parser.add_argument(
         "--format",
@@ -421,6 +427,13 @@ def main():
         args.num_sequences,
         args.seed
     )
+
+    if args.calib_batch_size > 1:
+        batched_data = []
+        for i in range(0, len(calibration_data), args.calib_batch_size):
+            batch = calibration_data[i:i + args.calib_batch_size]
+            batched_data.append(torch.cat(batch, dim=0))
+        calibration_data = batched_data
 
     if quantize_anything:
         if args.gptaq:
