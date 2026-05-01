@@ -188,7 +188,7 @@ class GPTAQ:
             P = None
 
         if self.alpha_mean_penalty is not None:
-            group_sums = torch.zeros((self.d_row, num_groups), device=device, dtype=dtype)
+            group_sums = torch.zeros((self.d_row, num_groups), device=device, dtype=torch.float32)
             # Initialize with 0 so it tracks the accumulated quantization error (mean shift), 
             # rather than the absolute sum of the weights.
         else:

@@ -31,6 +31,5 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --fuse_global_scale \
     --amp \
     --eval_perplexity \
-    --alpha=1.1 \
-    # --alpha_mean_penalty=0.8 \
+    --alpha=1 \
     # --plot
