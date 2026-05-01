@@ -1,6 +1,6 @@
 #!/bin/bash
 
-gpu_id=1
+gpu_id=0
 export CUDA_VISIBLE_DEVICES=$gpu_id
 
 export OMP_NUM_THREADS=8
@@ -29,6 +29,8 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --sequence_length=2048 \
     --dtype=bfloat16 \
     --fuse_global_scale \
+    --amp \
     --eval_perplexity \
-    --alpha=1 \
+    --alpha=1.1 \
+    # --alpha_mean_penalty=0.8 \
     # --plot

@@ -188,7 +188,7 @@ class GPTAQ:
             P = None
 
         if self.alpha_mean_penalty is not None:
-            group_sums = torch.zeros((self.d_row, num_groups), device=device, dtype=dtype)
+            group_sums = torch.zeros((self.d_row, num_groups), device=device, dtype=torch.float32)
             group_sums.index_add_(1, permuted_group_idx, w)
         else:
             group_sums = None

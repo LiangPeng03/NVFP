@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 
 @torch.no_grad()
-def compute_perplexity(model, data, batch_size: int = 1):
+def compute_perplexity(model, data, batch_size: int = 8):
     num_samples = len(data)
     device = next(model.parameters()).device
     # Running estimate of negative log-likelihood

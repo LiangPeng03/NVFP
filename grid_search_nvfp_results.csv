@@ -1,0 +1,6 @@
+timestamp,model,format,alpha,alpha_mean_penalty,wikitext_ppl,c4_ppl,status
+20260501_163544,HuggingFaceTB/SmolLM2-135M,nvfp,0,1,21.05,27.93,success
+20260501_164143,HuggingFaceTB/SmolLM2-135M,nvfp,0.25,1,20.79,27.55,success
+20260501_164742,HuggingFaceTB/SmolLM2-135M,nvfp,0.5,1,20.63,27.32,success
+20260501_165347,HuggingFaceTB/SmolLM2-135M,nvfp,0.75,1,20.60,27.40,success
+20260501_165950,HuggingFaceTB/SmolLM2-135M,nvfp,1,1,20.43,27.29,success
