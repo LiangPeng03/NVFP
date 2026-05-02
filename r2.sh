@@ -74,7 +74,7 @@ for alpha in "${ALPHAS[@]}"; do
             --amp \
             --eval_perplexity \
             --alpha=$alpha \
-            --alpha_mean_penalty=$penalty \
+            --channel_sorting \
             | grep -E "^Wikitext-2 perplexity:|^C4 perplexity:" >> ${OUTPUT_DIR}/log.txt
         
         # 提取结果（sed 比 awk 更鲁棒，不受前面字段影响）
