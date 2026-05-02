@@ -404,9 +404,13 @@ def gptaq_quantization(
 
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
                 # --- A. Full Precision Pass ---
+                saved_act_quantizers = {}
                 for name, layer in block.named_modules():
                     if isinstance(layer, QLinear):
                         layer.weight.data = orig_fp_weights[name].to(device)
+                        if hasattr(layer, 'act_quantizer') and getattr(layer, 'act_quantizer', None) is not None:
+                            saved_act_quantizers[name] = layer.act_quantizer
+                            layer.act_quantizer = None 
 
                 hooks = [dict(block.named_modules())[name].register_forward_hook(hook_factory(name)) for name in group]
 
@@ -420,6 +424,8 @@ def gptaq_quantization(
                 for name, layer in block.named_modules():
                     if isinstance(layer, QLinear):
                         layer.weight.data = quantized_weights[name]
+                        if name in saved_act_quantizers:
+                            layer.act_quantizer = saved_act_quantizers[name]
 
                 hooks = [dict(block.named_modules())[name].register_forward_hook(hook_factory(name)) for name in group]
 
@@ -430,7 +436,15 @@ def gptaq_quantization(
 
                 # Accumulate H and dXXT
                 for name in group:
-                    gptaq_handles[name].update(fp_cache[name], fp_input=fp_inputs[name])
+                    layer = dict(block.named_modules())[name]
+                    q_pass_inp = fp_cache[name] 
+                    
+                    # Implement "A before W": explicitly apply the current layer's activation quantizer
+                    if hasattr(layer, 'act_quantizer') and getattr(layer, 'act_quantizer', None) is not None:
+                        a_scales, a_zeros = layer.act_quantizer.get_quantization_params(q_pass_inp)
+                        q_pass_inp = layer.act_quantizer(q_pass_inp, a_scales, a_zeros)
+                        
+                    gptaq_handles[name].update(q_pass_inp, fp_input=fp_inputs[name])
 
             # Quantize the current group
             for layer_name in group:
