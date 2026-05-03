@@ -294,7 +294,7 @@ def gptaq_quantization(
         device_type = torch.accelerator.current_accelerator().type if hasattr(torch, "accelerator") else "cuda"
 
         act_means = {}
-        if getattr(args, "channel_sorting", False):
+        if getattr(args, "sign_flipping", getattr(args, "channel_sorting", False)):
             def hook_factory(name):
                 def _hook(_, inp, out):
                     mean_val = inp[0].detach().mean(dim=(0, 1))
@@ -306,7 +306,9 @@ def gptaq_quantization(
             
             hooks = []
             hooks.append(block.self_attn.q_proj.register_forward_hook(hook_factory("qkv")))
+            hooks.append(block.self_attn.o_proj.register_forward_hook(hook_factory("o_proj")))
             hooks.append(block.mlp.gate_proj.register_forward_hook(hook_factory("gate_up")))
+            hooks.append(block.mlp.down_proj.register_forward_hook(hook_factory("down_proj")))
             
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
                 with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
@@ -315,7 +317,7 @@ def gptaq_quantization(
             for h in hooks:
                 h.remove()
 
-        def get_optimal_sign_flips(W_fused, act_mean, lambda_w=10.0, lambda_a=1.0):
+        def get_optimal_sign_flips(W_fused, act_mean, lambda_w=10, lambda_a=1):
             in_features = W_fused.shape[1]
             sign_vector = torch.ones(in_features, device=W_fused.device)
             
@@ -384,6 +386,19 @@ def gptaq_quantization(
             
             block.post_attention_layernorm.weight.data *= gate_up_signs
             for w in gate_up_weights: w.mul_(gate_up_signs)
+
+            # --- 3. o_proj (Only if MHA, to avoid complex head-sharing logic in GQA/MQA) ---
+            if block.self_attn.v_proj.weight.shape[0] == block.self_attn.o_proj.weight.shape[1]:
+                o_fused = block.self_attn.o_proj.weight.data
+                o_signs = get_optimal_sign_flips(o_fused, act_means["o_proj"])
+                block.self_attn.o_proj.weight.data *= o_signs
+                block.self_attn.v_proj.weight.data *= o_signs.unsqueeze(1) 
+
+            # --- 4. down_proj ---
+            down_fused = block.mlp.down_proj.weight.data
+            down_signs = get_optimal_sign_flips(down_fused, act_means["down_proj"])
+            block.mlp.down_proj.weight.data *= down_signs
+            block.mlp.up_proj.weight.data *= down_signs.unsqueeze(1)
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
