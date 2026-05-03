@@ -315,7 +315,7 @@ def gptaq_quantization(
             for h in hooks:
                 h.remove()
 
-        def get_iterative_swapping_permutation(W_fused, act_mean, group_size=128, block_size=256, lambda_w=1.0, lambda_a=1.0, max_iters=2000):
+        def get_iterative_swapping_permutation(W_fused, act_mean, block_size=256, lambda_w=1.0, lambda_a=0.0, max_iters=2000):
             in_features = W_fused.shape[1]
             perm_idx = torch.arange(in_features, device=W_fused.device)
             
@@ -328,27 +328,20 @@ def gptaq_quantization(
                 blk_scores = scores[b_start:b_end].clone()
                 blk_perm = torch.arange(b_end - b_start, device=W_fused.device)
                 
-                num_groups = (b_end - b_start) // group_size
-                if num_groups < 2: continue
+                half = (b_end - b_start) // 2
+                if half < 1: continue
                     
-                sorted_indices = torch.argsort(blk_scores)
-                matrix_idx = sorted_indices.view(group_size, num_groups)
-                for i in range(1, group_size, 2):
-                    matrix_idx[i] = matrix_idx[i].flip(dims=[0])
-                blk_perm = matrix_idx.t().flatten()
-                
-                valid_len = num_groups * group_size
+                blk_perm = torch.argsort(blk_scores)
                 
                 def calc_cost(perm):
-                    return blk_scores[perm[:valid_len]].view(num_groups, group_size).sum(dim=1).abs().sum()
+                    return blk_scores[perm[:half]].sum().abs() + blk_scores[perm[half:]].sum().abs()
                     
                 current_cost = calc_cost(blk_perm)
                 
                 for _ in range(max_iters):
-                    idx1, idx2 = torch.randint(0, valid_len, (2,), device=W_fused.device)
-                    if idx1 // group_size == idx2 // group_size:
-                        continue 
-                        
+                    idx1 = torch.randint(0, half, (1,), device=W_fused.device)
+                    idx2 = torch.randint(half, b_end - b_start, (1,), device=W_fused.device)
+                    
                     blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2], blk_perm[idx1].clone()
                     new_cost = calc_cost(blk_perm)
                     
@@ -375,13 +368,13 @@ def gptaq_quantization(
             # --- 1. QKV ---
             qkv_weights = [block.self_attn.q_proj.weight.data, block.self_attn.k_proj.weight.data, block.self_attn.v_proj.weight.data]
             qkv_fused = torch.cat(qkv_weights, dim=0) 
-            qkv_perm = get_iterative_swapping_permutation(qkv_fused, act_means["qkv"], group_size=G)
+            qkv_perm = get_iterative_swapping_permutation(qkv_fused, act_means["qkv"])
             qkv_in_transform = CompositeTransform([PermutationTransform(qkv_perm), qkv_in_transform])
 
             # --- 2. Gate_Up ---
             gate_up_weights = [block.mlp.gate_proj.weight.data, block.mlp.up_proj.weight.data]
             gate_up_fused = torch.cat(gate_up_weights, dim=0)
-            gate_up_perm = get_iterative_swapping_permutation(gate_up_fused, act_means["gate_up"], group_size=G)
+            gate_up_perm = get_iterative_swapping_permutation(gate_up_fused, act_means["gate_up"])
             gate_up_in_transform = CompositeTransform([PermutationTransform(gate_up_perm), gate_up_in_transform])
 
         quantized_attn = get_attention_layer(model.config)(
