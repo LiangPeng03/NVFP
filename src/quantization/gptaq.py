@@ -306,7 +306,9 @@ def gptaq_quantization(
             
             hooks = []
             hooks.append(block.self_attn.q_proj.register_forward_hook(hook_factory("qkv")))
+            hooks.append(block.self_attn.o_proj.register_forward_hook(hook_factory("o_proj")))
             hooks.append(block.mlp.gate_proj.register_forward_hook(hook_factory("gate_up")))
+            hooks.append(block.mlp.down_proj.register_forward_hook(hook_factory("down_proj")))
             
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
                 with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
@@ -364,18 +366,39 @@ def gptaq_quantization(
             print("  Applying Fused Block-wise Iterative Swapping Permutation...")
             from ..transforms.transforms import CompositeTransform, PermutationTransform
             G = getattr(args, "hadamard_group_size", 128)
+            B = G * 2 # To ensure perfect bisectional alignment (half = G)
             
             # --- 1. QKV ---
             qkv_weights = [block.self_attn.q_proj.weight.data, block.self_attn.k_proj.weight.data, block.self_attn.v_proj.weight.data]
             qkv_fused = torch.cat(qkv_weights, dim=0) 
-            qkv_perm = get_iterative_swapping_permutation(qkv_fused, act_means["qkv"])
+            qkv_perm = get_iterative_swapping_permutation(qkv_fused, act_means["qkv"], block_size=B)
             qkv_in_transform = CompositeTransform([PermutationTransform(qkv_perm), qkv_in_transform])
 
             # --- 2. Gate_Up ---
             gate_up_weights = [block.mlp.gate_proj.weight.data, block.mlp.up_proj.weight.data]
             gate_up_fused = torch.cat(gate_up_weights, dim=0)
-            gate_up_perm = get_iterative_swapping_permutation(gate_up_fused, act_means["gate_up"])
+            gate_up_perm = get_iterative_swapping_permutation(gate_up_fused, act_means["gate_up"], block_size=B)
             gate_up_in_transform = CompositeTransform([PermutationTransform(gate_up_perm), gate_up_in_transform])
+
+            # --- 3. o_proj (Only if MHA, to avoid complex head-sharing logic in GQA/MQA) ---
+            if block.self_attn.v_proj.weight.shape[0] == block.self_attn.o_proj.weight.shape[1]:
+                head_dim = model.config.hidden_size // model.config.num_attention_heads
+                o_B = min(B, head_dim) # STRICTLY limit to head_dim to prevent cross-head corruption
+                o_fused = block.self_attn.o_proj.weight.data
+                o_perm = get_iterative_swapping_permutation(o_fused, act_means["o_proj"], block_size=o_B)
+                
+                # Zero-overhead In-place Permutation
+                block.self_attn.o_proj.weight.data = block.self_attn.o_proj.weight.data[:, o_perm]
+                block.self_attn.v_proj.weight.data = block.self_attn.v_proj.weight.data[o_perm, :]
+
+            # --- 4. down_proj ---
+            down_fused = block.mlp.down_proj.weight.data
+            down_perm = get_iterative_swapping_permutation(down_fused, act_means["down_proj"], block_size=B)
+            
+            # Zero-overhead In-place Permutation
+            block.mlp.down_proj.weight.data = block.mlp.down_proj.weight.data[:, down_perm]
+            block.mlp.gate_proj.weight.data = block.mlp.gate_proj.weight.data[down_perm, :]
+            block.mlp.up_proj.weight.data = block.mlp.up_proj.weight.data[down_perm, :]
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
