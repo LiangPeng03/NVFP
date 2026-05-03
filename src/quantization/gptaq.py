@@ -315,7 +315,7 @@ def gptaq_quantization(
             for h in hooks:
                 h.remove()
 
-        def get_optimal_sign_flips(W_fused, act_mean, lambda_w=1.0, lambda_a=0.0):
+        def get_optimal_sign_flips(W_fused, act_mean, lambda_w=10.0, lambda_a=1.0):
             in_features = W_fused.shape[1]
             sign_vector = torch.ones(in_features, device=W_fused.device)
             
