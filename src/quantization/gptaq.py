@@ -315,28 +315,77 @@ def gptaq_quantization(
             for h in hooks:
                 h.remove()
 
-        def get_balanced_perm(mean_vals, group_size):
-            sorted_idx = torch.argsort(mean_vals)
-            D = len(mean_vals)
-            G = group_size
-            num_groups = D // G
-            matrix_idx = sorted_idx.view(G, num_groups)
-            for i in range(1, G, 2):
-                matrix_idx[i] = matrix_idx[i].flip(dims=[0])
-            return matrix_idx.t().flatten()
+        def get_iterative_swapping_permutation(W_fused, act_mean, group_size=128, block_size=256, lambda_w=1.0, lambda_a=1.0, max_iters=2000):
+            in_features = W_fused.shape[1]
+            perm_idx = torch.arange(in_features, device=W_fused.device)
+            
+            w_mean = W_fused.mean(dim=0)
+            scores = lambda_w * w_mean + lambda_a * act_mean
+            
+            for b_start in range(0, in_features, block_size):
+                b_end = min(b_start + block_size, in_features)
+                
+                blk_scores = scores[b_start:b_end].clone()
+                blk_perm = torch.arange(b_end - b_start, device=W_fused.device)
+                
+                num_groups = (b_end - b_start) // group_size
+                if num_groups < 2: continue
+                    
+                sorted_indices = torch.argsort(blk_scores)
+                matrix_idx = sorted_indices.view(group_size, num_groups)
+                for i in range(1, group_size, 2):
+                    matrix_idx[i] = matrix_idx[i].flip(dims=[0])
+                blk_perm = matrix_idx.t().flatten()
+                
+                valid_len = num_groups * group_size
+                
+                def calc_cost(perm):
+                    return blk_scores[perm[:valid_len]].view(num_groups, group_size).sum(dim=1).abs().sum()
+                    
+                current_cost = calc_cost(blk_perm)
+                
+                for _ in range(max_iters):
+                    idx1, idx2 = torch.randint(0, valid_len, (2,), device=W_fused.device)
+                    if idx1 // group_size == idx2 // group_size:
+                        continue 
+                        
+                    blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2], blk_perm[idx1].clone()
+                    new_cost = calc_cost(blk_perm)
+                    
+                    if new_cost < current_cost:
+                        current_cost = new_cost 
+                    else:
+                        blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2], blk_perm[idx1].clone()
+                        
+                perm_idx[b_start:b_end] = perm_idx[b_start + blk_perm]
+                
+            return perm_idx
+
+        # Offline fused permutation preprocessing (Zero-overhead at inference)
+        if getattr(args, "channel_sorting", False):
+            print("  Applying Fused Block-wise Iterative Swapping Permutation...")
+            G = getattr(args, "hadamard_group_size", 128)
+            
+            # --- 1. QKV ---
+            qkv_weights = [block.self_attn.q_proj.weight.data, block.self_attn.k_proj.weight.data, block.self_attn.v_proj.weight.data]
+            qkv_fused = torch.cat(qkv_weights, dim=0) 
+            qkv_perm = get_iterative_swapping_permutation(qkv_fused, act_means["qkv"], group_size=G)
+            
+            block.input_layernorm.weight.data = block.input_layernorm.weight.data[qkv_perm]
+            for w in qkv_weights: w.copy_(w[:, qkv_perm])
+
+            # --- 2. Gate_Up ---
+            gate_up_weights = [block.mlp.gate_proj.weight.data, block.mlp.up_proj.weight.data]
+            gate_up_fused = torch.cat(gate_up_weights, dim=0)
+            gate_up_perm = get_iterative_swapping_permutation(gate_up_fused, act_means["gate_up"], group_size=G)
+            
+            block.post_attention_layernorm.weight.data = block.post_attention_layernorm.weight.data[gate_up_perm]
+            for w in gate_up_weights: w.copy_(w[:, gate_up_perm])
 
         qkv_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         o_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         gate_up_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
-        down_in_transform = build_transform(args.transform_class, size=model.config.intermediate_size, **transform_kwargs)     
-
-        if getattr(args, "channel_sorting", False):
-            from ..transforms.transforms import CompositeTransform, PermutationTransform
-            qkv_perm = get_balanced_perm(act_means["qkv"], args.hadamard_group_size)
-            qkv_in_transform = CompositeTransform([PermutationTransform(qkv_perm), qkv_in_transform])
-            
-            gate_up_perm = get_balanced_perm(act_means["gate_up"], args.hadamard_group_size)
-            gate_up_in_transform = CompositeTransform([PermutationTransform(gate_up_perm), gate_up_in_transform])
+        down_in_transform = build_transform(args.transform_class, size=model.config.intermediate_size, **transform_kwargs)
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
