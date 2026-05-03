@@ -315,28 +315,74 @@ def gptaq_quantization(
             for h in hooks:
                 h.remove()
 
-        def get_balanced_perm(mean_vals, group_size):
-            sorted_idx = torch.argsort(mean_vals)
-            D = len(mean_vals)
-            G = group_size
-            num_groups = D // G
-            matrix_idx = sorted_idx.view(G, num_groups)
-            for i in range(1, G, 2):
-                matrix_idx[i] = matrix_idx[i].flip(dims=[0])
-            return matrix_idx.t().flatten()
+        def get_optimal_sign_flips(W_fused, act_mean, group_size=64, lambda_w=1.0, lambda_a=0.0):
+            in_features = W_fused.shape[1]
+            sign_vector = torch.ones(in_features, device=W_fused.device)
+            
+            w_mean = W_fused.mean(dim=0)
+            
+            for g in range(0, in_features, group_size):
+                g_end = min(g + group_size, in_features)
+                current_signs = torch.ones(g_end - g, device=W_fused.device)
+                
+                g_W_mean = w_mean[g:g_end]
+                g_A_mean = act_mean[g:g_end]
+                
+                def calc_cost(signs):
+                    mean_W = (g_W_mean * signs).sum().abs()
+                    mean_A = (g_A_mean * signs).sum().abs()
+                    return lambda_w * mean_W + lambda_a * mean_A
+
+                current_cost = calc_cost(current_signs)
+
+                # Greedy descent to find optimal sign flips
+                while True:
+                    best_cost = current_cost
+                    flip_candidate = -1
+                    
+                    for i in range(g_end - g):
+                        current_signs[i] *= -1 # Try flip
+                        cost = calc_cost(current_signs)
+                        if cost < best_cost:
+                            best_cost = cost
+                            flip_candidate = i
+                        current_signs[i] *= -1 # Revert
+                        
+                    if flip_candidate != -1:
+                        current_signs[flip_candidate] *= -1
+                        current_cost = best_cost
+                    else:
+                        break # Reached local minimum
+                        
+                sign_vector[g:g_end] = current_signs
+                
+            return sign_vector
 
         qkv_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         o_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         gate_up_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
         down_in_transform = build_transform(args.transform_class, size=model.config.intermediate_size, **transform_kwargs)     
 
-        if getattr(args, "channel_sorting", False):
-            from ..transforms.transforms import CompositeTransform, PermutationTransform
-            qkv_perm = get_balanced_perm(act_means["qkv"], args.hadamard_group_size)
-            qkv_in_transform = CompositeTransform([PermutationTransform(qkv_perm), qkv_in_transform])
+        # Offline fused sign-flipping preprocessing (True Zero-overhead)
+        if getattr(args, "sign_flipping", getattr(args, "channel_sorting", False)):
+            print("  Applying Fused Intra-group Sign-Flipping...")
+            G = getattr(args, "hadamard_group_size", 128)
             
-            gate_up_perm = get_balanced_perm(act_means["gate_up"], args.hadamard_group_size)
-            gate_up_in_transform = CompositeTransform([PermutationTransform(gate_up_perm), gate_up_in_transform])
+            # --- 1. QKV ---
+            qkv_weights = [block.self_attn.q_proj.weight.data, block.self_attn.k_proj.weight.data, block.self_attn.v_proj.weight.data]
+            qkv_fused = torch.cat(qkv_weights, dim=0) 
+            qkv_signs = get_optimal_sign_flips(qkv_fused, act_means["qkv"], group_size=G)
+            
+            block.input_layernorm.weight.data *= qkv_signs
+            for w in qkv_weights: w.mul_(qkv_signs)
+
+            # --- 2. Gate_Up ---
+            gate_up_weights = [block.mlp.gate_proj.weight.data, block.mlp.up_proj.weight.data]
+            gate_up_fused = torch.cat(gate_up_weights, dim=0)
+            gate_up_signs = get_optimal_sign_flips(gate_up_fused, act_means["gate_up"], group_size=G)
+            
+            block.post_attention_layernorm.weight.data *= gate_up_signs
+            for w in gate_up_weights: w.mul_(gate_up_signs)
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
