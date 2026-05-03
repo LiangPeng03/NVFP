@@ -356,36 +356,33 @@ def gptaq_quantization(
                         current_cost = new_cost 
                     else:
                         blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2], blk_perm[idx1].clone()
-                        
+                
                 perm_idx[b_start:b_end] = perm_idx[b_start + blk_perm]
                 
             return perm_idx
 
-        # Offline fused permutation preprocessing (Zero-overhead at inference)
+        qkv_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
+        o_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
+        gate_up_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
+        down_in_transform = build_transform(args.transform_class, size=model.config.intermediate_size, **transform_kwargs)
+
+        # Offline fused permutation preprocessing
         if getattr(args, "channel_sorting", False):
             print("  Applying Fused Block-wise Iterative Swapping Permutation...")
+            from ..transforms.transforms import CompositeTransform, PermutationTransform
             G = getattr(args, "hadamard_group_size", 128)
             
             # --- 1. QKV ---
             qkv_weights = [block.self_attn.q_proj.weight.data, block.self_attn.k_proj.weight.data, block.self_attn.v_proj.weight.data]
             qkv_fused = torch.cat(qkv_weights, dim=0) 
             qkv_perm = get_iterative_swapping_permutation(qkv_fused, act_means["qkv"], group_size=G)
-            
-            block.input_layernorm.weight.data = block.input_layernorm.weight.data[qkv_perm]
-            for w in qkv_weights: w.copy_(w[:, qkv_perm])
+            qkv_in_transform = CompositeTransform([PermutationTransform(qkv_perm), qkv_in_transform])
 
             # --- 2. Gate_Up ---
             gate_up_weights = [block.mlp.gate_proj.weight.data, block.mlp.up_proj.weight.data]
             gate_up_fused = torch.cat(gate_up_weights, dim=0)
             gate_up_perm = get_iterative_swapping_permutation(gate_up_fused, act_means["gate_up"], group_size=G)
-            
-            block.post_attention_layernorm.weight.data = block.post_attention_layernorm.weight.data[gate_up_perm]
-            for w in gate_up_weights: w.copy_(w[:, gate_up_perm])
-
-        qkv_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
-        o_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
-        gate_up_in_transform = build_transform(args.transform_class, size=model.config.hidden_size, **transform_kwargs)
-        down_in_transform = build_transform(args.transform_class, size=model.config.intermediate_size, **transform_kwargs)
+            gate_up_in_transform = CompositeTransform([PermutationTransform(gate_up_perm), gate_up_in_transform])
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
