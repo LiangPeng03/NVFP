@@ -315,14 +315,16 @@ def gptaq_quantization(
             for h in hooks:
                 h.remove()
 
-        def get_optimal_sign_flips(W_fused, act_mean, group_size=64, lambda_w=1.0, lambda_a=0.0):
+        def get_optimal_sign_flips(W_fused, act_mean, lambda_w=1.0, lambda_a=0.0):
             in_features = W_fused.shape[1]
             sign_vector = torch.ones(in_features, device=W_fused.device)
             
             w_mean = W_fused.mean(dim=0)
             
-            for g in range(0, in_features, group_size):
-                g_end = min(g + group_size, in_features)
+            # Use a fixed internal group size for balancing
+            internal_g = 128
+            for g in range(0, in_features, internal_g):
+                g_end = min(g + internal_g, in_features)
                 current_signs = torch.ones(g_end - g, device=W_fused.device)
                 
                 g_W_mean = w_mean[g:g_end]
@@ -335,24 +337,23 @@ def gptaq_quantization(
 
                 current_cost = calc_cost(current_signs)
 
-                # Greedy descent to find optimal sign flips
                 while True:
                     best_cost = current_cost
                     flip_candidate = -1
                     
                     for i in range(g_end - g):
-                        current_signs[i] *= -1 # Try flip
+                        current_signs[i] *= -1 
                         cost = calc_cost(current_signs)
                         if cost < best_cost:
                             best_cost = cost
                             flip_candidate = i
-                        current_signs[i] *= -1 # Revert
+                        current_signs[i] *= -1 
                         
                     if flip_candidate != -1:
                         current_signs[flip_candidate] *= -1
                         current_cost = best_cost
                     else:
-                        break # Reached local minimum
+                        break 
                         
                 sign_vector[g:g_end] = current_signs
                 
@@ -371,7 +372,7 @@ def gptaq_quantization(
             # --- 1. QKV ---
             qkv_weights = [block.self_attn.q_proj.weight.data, block.self_attn.k_proj.weight.data, block.self_attn.v_proj.weight.data]
             qkv_fused = torch.cat(qkv_weights, dim=0) 
-            qkv_signs = get_optimal_sign_flips(qkv_fused, act_means["qkv"], group_size=G)
+            qkv_signs = get_optimal_sign_flips(qkv_fused, act_means["qkv"])
             
             block.input_layernorm.weight.data *= qkv_signs
             for w in qkv_weights: w.mul_(qkv_signs)
@@ -379,7 +380,7 @@ def gptaq_quantization(
             # --- 2. Gate_Up ---
             gate_up_weights = [block.mlp.gate_proj.weight.data, block.mlp.up_proj.weight.data]
             gate_up_fused = torch.cat(gate_up_weights, dim=0)
-            gate_up_signs = get_optimal_sign_flips(gate_up_fused, act_means["gate_up"], group_size=G)
+            gate_up_signs = get_optimal_sign_flips(gate_up_fused, act_means["gate_up"])
             
             block.post_attention_layernorm.weight.data *= gate_up_signs
             for w in gate_up_weights: w.mul_(gate_up_signs)
