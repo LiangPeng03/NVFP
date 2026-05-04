@@ -18,6 +18,7 @@ from ..transforms.transforms import build_transform, get_transform_matrix
 from ..utils.linalg_utils import inv_sym
 from ..utils.common_utils import clear_device_cache, to, maybe_first_element
 from ..utils.model_utils import InputCollector, ForwardInterrupt, get_attention_layer, get_mlp_layer, get_number_of_rows_and_cols
+from ..utils.plot_utils import PreprocessingStatsCollector
 
 try:
     import wandb
@@ -286,6 +287,8 @@ def gptaq_quantization(
     if args.cpu_offload_modules:
         model.get_input_embeddings().cpu()
 
+    collector = PreprocessingStatsCollector(hadamard_group_size=args.hadamard_group_size) if getattr(args, "plot", False) else None
+
     for block_idx, block in enumerate(blocks):
         print(f"Processing block {block_idx}...")
         if args.cpu_offload_modules:
@@ -316,6 +319,15 @@ def gptaq_quantization(
             
             for h in hooks:
                 h.remove()
+
+            if collector:
+                # --- Phase 1: Original Stats ---
+                collector.collect("q_proj", "Original", block.self_attn.q_proj.weight.data, act_means.get("qkv"))
+                collector.collect("v_proj", "Original", block.self_attn.v_proj.weight.data, act_means.get("qkv"))
+                collector.collect("o_proj", "Original", block.self_attn.o_proj.weight.data, act_means.get("o_proj"))
+                collector.collect("gate_proj", "Original", block.mlp.gate_proj.weight.data, act_means.get("gate_up"))
+                collector.collect("up_proj", "Original", block.mlp.up_proj.weight.data, act_means.get("gate_up"))
+                collector.collect("down_proj", "Original", block.mlp.down_proj.weight.data, act_means.get("down_proj"))
 
         def get_optimal_sign_flips(W_fused, act_mean, lambda_w=10, lambda_a=1):
             in_features = W_fused.shape[1]
@@ -400,6 +412,15 @@ def gptaq_quantization(
             block.mlp.down_proj.weight.data *= down_signs
             block.mlp.up_proj.weight.data *= down_signs.unsqueeze(1)
 
+        if collector:
+            # --- Phase 2: Preprocessed Stats ---
+            collector.collect("q_proj", "Preprocessed", block.self_attn.q_proj.weight.data)
+            collector.collect("v_proj", "Preprocessed", block.self_attn.v_proj.weight.data)
+            collector.collect("o_proj", "Preprocessed", block.self_attn.o_proj.weight.data)
+            collector.collect("gate_proj", "Preprocessed", block.mlp.gate_proj.weight.data)
+            collector.collect("up_proj", "Preprocessed", block.mlp.up_proj.weight.data)
+            collector.collect("down_proj", "Preprocessed", block.mlp.down_proj.weight.data)
+
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,
             qkv_in_transform=qkv_in_transform, o_in_transform=o_in_transform
@@ -438,6 +459,15 @@ def gptaq_quantization(
         block.mlp.up_proj.weight.data = gate_up_in_transform(block.mlp.up_proj.weight, inv_t=True)
         block.mlp.down_proj.weight.data = down_in_transform(block.mlp.down_proj.weight, inv_t=True)
         
+        if collector:
+            # --- Phase 3: Rotated Stats ---
+            collector.collect("q_proj", "Rotated", block.self_attn.q_proj.weight.data)
+            collector.collect("v_proj", "Rotated", block.self_attn.v_proj.weight.data)
+            collector.collect("o_proj", "Rotated", block.self_attn.o_proj.weight.data)
+            collector.collect("gate_proj", "Rotated", block.mlp.gate_proj.weight.data)
+            collector.collect("up_proj", "Rotated", block.mlp.up_proj.weight.data)
+            collector.collect("down_proj", "Rotated", block.mlp.down_proj.weight.data)
+
         orig_fp_weights = {}
         quantized_weights = {}
         for layer_name, layer in block.named_modules():
@@ -563,4 +593,14 @@ def gptaq_quantization(
         clear_device_cache(garbage_collection=True)
 
     clear_device_cache(garbage_collection=True)
+
+    if collector:
+        print("\n" + "="*50)
+        print("PREPROCESSING STATISTICS SUMMARY")
+        print("="*50)
+        print("| Module     | Raw_Err  | Prep_Err | Rot_Err  | Imp. % | Var.   |")
+        print("|------------|----------|----------|----------|--------|--------|")
+        collector.plot_all(save_dir=args.save_path + "/stats_plots" if args.save_path else "./stats_plots")
+        print("="*50 + "\n")
+
     return quantized_state_dict, non_quantized_state_dict
