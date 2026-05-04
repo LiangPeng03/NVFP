@@ -21,7 +21,7 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --transform_class=hadamard \
     --w_observer=mse \
     --quantization_order=activation \
-    --hadamard_group_size=64 \
+    --hadamard_group_size=32 \
     --dataset_name_or_path=c4 \
     --num_sequences=128 \
     --gptaq \

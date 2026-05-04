@@ -336,7 +336,7 @@ def gptaq_quantization(
             w_mean = W_fused.mean(dim=0)
             
             # Auto-align with actual hadamard group size to ensure DC suppression
-            G = getattr(args, "hadamard_group_size", 128)
+            G = getattr(args, "w_group_size", 128)
             for g in range(0, in_features, G):
                 g_end = min(g + G, in_features)
                 current_signs = torch.ones(g_end - g, device=W_fused.device)
