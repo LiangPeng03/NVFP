@@ -309,9 +309,9 @@ def gptaq_quantization(
             
             hooks = []
             hooks.append(block.self_attn.q_proj.register_forward_hook(hook_factory("qkv")))
-            hooks.append(block.self_attn.o_proj.register_forward_hook(hook_factory("o_proj")))
+            # hooks.append(block.self_attn.o_proj.register_forward_hook(hook_factory("o_proj")))
             hooks.append(block.mlp.gate_proj.register_forward_hook(hook_factory("gate_up")))
-            hooks.append(block.mlp.down_proj.register_forward_hook(hook_factory("down_proj")))
+            # hooks.append(block.mlp.down_proj.register_forward_hook(hook_factory("down_proj")))
             
             for inp_args, inp_kwargs in zip(input_args, input_kwargs):
                 with torch.no_grad(), torch.amp.autocast(device_type=device_type, enabled=args.amp):
@@ -344,8 +344,12 @@ def gptaq_quantization(
                 g_W_mean = w_mean[g:g_end]
                 g_A_mean = act_mean[g:g_end]
                 
+                W_group = W_fused[:, g:g_end]
+                
                 def calc_cost(signs):
-                    mean_W = (g_W_mean * signs).sum().abs()
+                    # 真正的块均值优化：计算每一行乘上符号后的绝对值加和，再求均值
+                    mean_W = (W_group * signs).sum(dim=1).abs().mean()
+                    # 激活值目前只有列均值，保持原样（若需应用到所有 token 的行均值，需重构 hook 捕获完整的 batch 激活张量）
                     mean_A = (g_A_mean * signs).sum().abs()
                     return lambda_w * mean_W + lambda_a * mean_A
 
@@ -400,17 +404,17 @@ def gptaq_quantization(
             for w in gate_up_weights: w.mul_(gate_up_signs)
 
             # --- 3. o_proj (Only if MHA, to avoid complex head-sharing logic in GQA/MQA) ---
-            if block.self_attn.v_proj.weight.shape[0] == block.self_attn.o_proj.weight.shape[1]:
-                o_fused = block.self_attn.o_proj.weight.data
-                o_signs = get_optimal_sign_flips(o_fused, act_means["o_proj"])
-                block.self_attn.o_proj.weight.data *= o_signs
-                block.self_attn.v_proj.weight.data *= o_signs.unsqueeze(1) 
+            # if block.self_attn.v_proj.weight.shape[0] == block.self_attn.o_proj.weight.shape[1]:
+            #     o_fused = block.self_attn.o_proj.weight.data
+            #     o_signs = get_optimal_sign_flips(o_fused, act_means["o_proj"])
+            #     block.self_attn.o_proj.weight.data *= o_signs
+            #     block.self_attn.v_proj.weight.data *= o_signs.unsqueeze(1) 
 
-            # --- 4. down_proj ---
-            down_fused = block.mlp.down_proj.weight.data
-            down_signs = get_optimal_sign_flips(down_fused, act_means["down_proj"])
-            block.mlp.down_proj.weight.data *= down_signs
-            block.mlp.up_proj.weight.data *= down_signs.unsqueeze(1)
+            # # --- 4. down_proj ---
+            # down_fused = block.mlp.down_proj.weight.data
+            # down_signs = get_optimal_sign_flips(down_fused, act_means["down_proj"])
+            # block.mlp.down_proj.weight.data *= down_signs
+            # block.mlp.up_proj.weight.data *= down_signs.unsqueeze(1)
 
         if collector:
             # --- Phase 2: Preprocessed Stats ---

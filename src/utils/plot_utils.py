@@ -52,18 +52,9 @@ class PreprocessingStatsCollector:
         sns.set_theme(style="whitegrid")
         
         for mod, phases in self.stats.items():
-            print(f"Generating plots for {mod}...")
-            # 1. Algorithm Convergence (Metric 1)
-            plt.figure(figsize=(10, 6))
-            for p in ["Original", "Preprocessed"]:
-                sns.kdeplot(phases[p]["col_means"], label=p, fill=True)
-            plt.axvline(0, color='red', linestyle='--')
-            plt.title(f"{mod} - Distribution of Grouped Channel Means (Target Optimization)")
-            plt.legend()
-            plt.savefig(os.path.join(save_dir, f"{mod}_col_means.png"), dpi=300)
-            plt.close()
-
-            # 2. Actual Quantization Error / DC Outliers (Metric 2)
+            print(f"Generating group means plot for {mod}...")
+            
+            # Actual Quantization Error / DC Outliers (Metric 2)
             plt.figure(figsize=(10, 6))
             for p in ["Original", "Preprocessed", "Rotated"]:
                 sns.kdeplot(phases[p]["row_means"], label=p, fill=True)
@@ -72,33 +63,10 @@ class PreprocessingStatsCollector:
             plt.legend()
             plt.savefig(os.path.join(save_dir, f"{mod}_group_means.png"), dpi=300)
             plt.close()
-
-            # 3. Variance Correlation (Scatter)
-            # We take Preprocessed stats
-            vars_v = np.array(phases["Preprocessed"]["col_vars"])
-            # row_means is [out_f * num_groups]. col_vars is [num_groups].
-            # We need to broadcast col_vars to match row_means.
-            num_groups = len(vars_v)
-            out_f = len(phases["Preprocessed"]["row_means"]) // num_groups
-            
-            # Subsample for plotting to avoid freezing
-            indices = np.random.choice(len(phases["Preprocessed"]["row_means"]), min(10000, len(phases["Preprocessed"]["row_means"])), replace=False)
-            sampled_row_means = np.array(phases["Preprocessed"]["row_means"])[indices]
-            # Map index to group_index
-            sampled_vars = vars_v[indices % num_groups]
-            
-            plt.figure(figsize=(10, 6))
-            sns.regplot(x=sampled_vars, y=np.abs(sampled_row_means), scatter_kws={'alpha':0.1}, line_kws={'color':'red'})
-            plt.xlabel("Average Channel Variance in Group")
-            plt.ylabel("Absolute Row-Group Mean (DC Residue)")
-            plt.title(f"{mod} - Correlation: Why Preprocessing Fails (Variance vs DC Residue)")
-            plt.savefig(os.path.join(save_dir, f"{mod}_variance_correlation.png"), dpi=300)
-            plt.close()
             
             # Print Console Summary
             raw_err = np.abs(phases["Original"]["row_means"]).mean()
             prep_err = np.abs(phases["Preprocessed"]["row_means"]).mean()
             rot_err = np.abs(phases["Rotated"]["row_means"]).mean()
-            avg_var = np.mean(phases["Preprocessed"]["col_vars"])
             imp = (raw_err - prep_err) / (raw_err + 1e-8) * 100
-            print(f"| {mod:10} | Raw_Err: {raw_err:.4f} | Prep_Err: {prep_err:.4f} | Rot_Err: {rot_err:.4f} | Imp: {imp:6.1f}% | Var: {avg_var:.4f} |")
+            print(f"| {mod:10} | Raw_Err: {raw_err:.4f} | Prep_Err: {prep_err:.4f} | Rot_Err: {rot_err:.4f} | Imp: {imp:6.1f}% |")
