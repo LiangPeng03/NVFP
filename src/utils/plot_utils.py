@@ -6,8 +6,8 @@ import seaborn as sns
 from typing import Dict, List
 
 class PreprocessingStatsCollector:
-    def __init__(self, hadamard_group_size=128):
-        self.hadamard_group_size = hadamard_group_size
+    def __init__(self, w_group_size=16):
+        self.w_group_size = w_group_size
         # Structure: stats[module_name][phase][metric_name] = List of values
         self.stats = {}
 
@@ -24,28 +24,16 @@ class PreprocessingStatsCollector:
         if X_mean is not None:
             X_mean = X_mean.float().cpu()
 
-        G = self.hadamard_group_size
+        G = self.w_group_size
         out_f, in_f = W.shape
         
-        # 1. Metric 1: Mean of Channel Means (Column-wise)
-        # Col means: [in_features]
-        col_means = W.mean(dim=0)
-        # Group them into [in_features // G, G]
         num_groups = in_f // G
-        grouped_col_means = col_means[:num_groups * G].view(num_groups, G).mean(dim=1)
-        self.stats[module_name][phase]["col_means"].extend(grouped_col_means.tolist())
-
-        # 2. Metric 2: Actual Group Means (Row-wise)
-        # For each row, group G elements.
-        # W_grouped: [out_features, in_features // G, G]
+        
+        # We only care about the actual group means (Row-wise means of each 16/32 element group)
+        # W_grouped: [out_features, num_groups, G]
         W_grouped = W[:, :num_groups * G].view(out_f, num_groups, G)
         row_group_means = W_grouped.mean(dim=2) # [out_features, num_groups]
         self.stats[module_name][phase]["row_means"].extend(row_group_means.flatten().tolist())
-
-        # 3. Metric 3: Mean of Channel Variances
-        col_vars = W.var(dim=0)
-        grouped_col_vars = col_vars[:num_groups * G].view(num_groups, G).mean(dim=1)
-        self.stats[module_name][phase]["col_vars"].extend(grouped_col_vars.tolist())
 
     def plot_all(self, save_dir="./preprocessing_plots"):
         os.makedirs(save_dir, exist_ok=True)
@@ -68,5 +56,7 @@ class PreprocessingStatsCollector:
             raw_err = np.abs(phases["Original"]["row_means"]).mean()
             prep_err = np.abs(phases["Preprocessed"]["row_means"]).mean()
             rot_err = np.abs(phases["Rotated"]["row_means"]).mean()
-            imp = (raw_err - prep_err) / (raw_err + 1e-8) * 100
-            print(f"| {mod:10} | Raw_Err: {raw_err:.4f} | Prep_Err: {prep_err:.4f} | Rot_Err: {rot_err:.4f} | Imp: {imp:6.1f}% |")
+            
+            imp_prep = (raw_err - prep_err) / (raw_err + 1e-8) * 100
+            imp_rot = (raw_err - rot_err) / (raw_err + 1e-8) * 100
+            print(f"| {mod:10} | Raw_Err: {raw_err:.4f} | Prep_Err: {prep_err:.4f} (Imp: {imp_prep:5.1f}%) | Rot_Err: {rot_err:.4f} (Imp: {imp_rot:5.1f}%) |")

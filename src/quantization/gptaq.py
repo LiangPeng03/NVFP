@@ -287,7 +287,7 @@ def gptaq_quantization(
     if args.cpu_offload_modules:
         model.get_input_embeddings().cpu()
 
-    collector = PreprocessingStatsCollector(hadamard_group_size=args.hadamard_group_size) if getattr(args, "plot", False) else None
+    collector = PreprocessingStatsCollector(w_group_size=args.w_group_size) if getattr(args, "plot", False) else None
 
     for block_idx, block in enumerate(blocks):
         print(f"Processing block {block_idx}...")
@@ -335,8 +335,8 @@ def gptaq_quantization(
             
             w_mean = W_fused.mean(dim=0)
             
-            # Auto-align with actual hadamard group size to ensure DC suppression
-            G = getattr(args, "w_group_size", 128)
+            # 以量化分组大小（16或32）为局部单位，进行精细反转，确保落到具体量化组上的均值绝对值最小
+            G = getattr(args, "w_group_size", 16)
             for g in range(0, in_features, G):
                 g_end = min(g + G, in_features)
                 current_signs = torch.ones(g_end - g, device=W_fused.device)
@@ -599,12 +599,12 @@ def gptaq_quantization(
     clear_device_cache(garbage_collection=True)
 
     if collector:
-        print("\n" + "="*50)
-        print("PREPROCESSING STATISTICS SUMMARY")
-        print("="*50)
-        print("| Module     | Raw_Err  | Prep_Err | Rot_Err  | Imp. % | Var.   |")
-        print("|------------|----------|----------|----------|--------|--------|")
+        print("\n" + "="*80)
+        print("PREPROCESSING STATISTICS SUMMARY: QUANTIZATION GROUP MEANS (G=16/32)")
+        print("="*80)
+        print("| Module     | Raw_Err  | Prep_Err (Imp %) | Rot_Err  (Imp %) |")
+        print("|------------|----------|------------------|------------------|")
         collector.plot_all(save_dir=args.save_path + "/stats_plots" if args.save_path else "./stats_plots")
-        print("="*50 + "\n")
+        print("="*80 + "\n")
 
     return quantized_state_dict, non_quantized_state_dict
