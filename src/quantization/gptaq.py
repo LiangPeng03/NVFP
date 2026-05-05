@@ -447,12 +447,31 @@ def gptaq_quantization(
 
         if collector:
             # --- Phase 2: Preprocessed Stats ---
-            collector.collect("q_proj", "Preprocessed", block.self_attn.q_proj.weight.data)
-            collector.collect("v_proj", "Preprocessed", block.self_attn.v_proj.weight.data)
-            collector.collect("o_proj", "Preprocessed", block.self_attn.o_proj.weight.data)
-            collector.collect("gate_proj", "Preprocessed", block.mlp.gate_proj.weight.data)
-            collector.collect("up_proj", "Preprocessed", block.mlp.up_proj.weight.data)
-            collector.collect("down_proj", "Preprocessed", block.mlp.down_proj.weight.data)
+            # 提取原权重
+            q_w = block.self_attn.q_proj.weight.data.clone()
+            v_w = block.self_attn.v_proj.weight.data.clone()
+            o_w = block.self_attn.o_proj.weight.data.clone()
+            gate_w = block.mlp.gate_proj.weight.data.clone()
+            up_w = block.mlp.up_proj.weight.data.clone()
+            down_w = block.mlp.down_proj.weight.data.clone()
+            
+            # 因为通道重排对于 qkv 和 gate_up 是存放在 CompositeTransform 里的，
+            # weight.data 在内存里并没有被直接修改！这就是为什么您看到 0.0% 的原因！
+            # 现在我们在发给统计画图工具前，手动把排列应用上去，还原它的真实面貌！
+            if getattr(args, "channel_sorting", False):
+                if 'qkv_perm' in locals():
+                    q_w = q_w[:, qkv_perm]
+                    v_w = v_w[:, qkv_perm]
+                if 'gate_up_perm' in locals():
+                    gate_w = gate_w[:, gate_up_perm]
+                    up_w = up_w[:, gate_up_perm]
+                    
+            collector.collect("q_proj", "Preprocessed", q_w)
+            collector.collect("v_proj", "Preprocessed", v_w)
+            collector.collect("o_proj", "Preprocessed", o_w)
+            collector.collect("gate_proj", "Preprocessed", gate_w)
+            collector.collect("up_proj", "Preprocessed", up_w)
+            collector.collect("down_proj", "Preprocessed", down_w)
 
         quantized_attn = get_attention_layer(model.config)(
             model.config, layer_idx=block_idx, act_quantizer_kwargs=act_quantizer_kwargs,

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-gpu_id=1
+gpu_id=0
 export CUDA_VISIBLE_DEVICES=$gpu_id
 
 export OMP_NUM_THREADS=8
@@ -32,5 +32,5 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --amp \
     --eval_perplexity \
     --alpha=1 \
-    --channel_sorting \
-    --plot
+    # --channel_sorting \
+    # --plot
