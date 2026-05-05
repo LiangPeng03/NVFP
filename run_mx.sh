@@ -33,4 +33,4 @@ $HOME/.conda/envs/awq/bin/python model_quant.py \
     --eval_perplexity \
     --alpha=1 \
     --channel_sorting \
-    # --plot
+    --plot
