@@ -327,6 +327,10 @@ def gptaq_quantization(
             for b_start in range(0, in_features, block_size):
                 b_end = min(b_start + block_size, in_features)
                 
+                # 获取完整的权重块
+                W_blk = W_fused[:, b_start:b_end]
+                blk_act_mean = act_mean[b_start:b_end] if act_mean is not None else None
+                
                 blk_scores = scores[b_start:b_end].clone()
                 blk_perm = torch.arange(b_end - b_start, device=W_fused.device)
                 
@@ -336,7 +340,19 @@ def gptaq_quantization(
                 blk_perm = torch.argsort(blk_scores)
                 
                 def calc_cost(perm):
-                    return blk_scores[perm[:half]].sum().abs() + blk_scores[perm[half:]].sum().abs()
+                    # 真正的行级优化：计算两半区域每一行的具体均值偏移，求绝对值后再平均
+                    W_half1 = W_blk[:, perm[:half]]
+                    W_half2 = W_blk[:, perm[half:]]
+                    mean_W = W_half1.sum(dim=1).abs().mean() + W_half2.sum(dim=1).abs().mean()
+                    
+                    if lambda_a > 0 and blk_act_mean is not None:
+                        act_1 = blk_act_mean[perm[:half]].sum().abs()
+                        act_2 = blk_act_mean[perm[half:]].sum().abs()
+                        mean_A = act_1 + act_2
+                    else:
+                        mean_A = 0
+                        
+                    return lambda_w * mean_W + lambda_a * mean_A
                     
                 current_cost = calc_cost(blk_perm)
                 
