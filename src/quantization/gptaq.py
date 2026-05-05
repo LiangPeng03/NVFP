@@ -352,14 +352,16 @@ def gptaq_quantization(
                 blk_perm = torch.argsort(blk_scores)
                 
                 def calc_cost(perm):
-                    # 真正的行级优化：计算两半区域每一行的具体均值偏移，求绝对值后再平均
+                    # 真正的行级优化：使用平方和（L2）惩罚。
+                    # 如果用绝对值(L1)，|r1| + |r2| 在符号相同时是一个常数，导致梯度为0（无法交换）。
+                    # 用平方和 r1^2 + r2^2 能强迫贪心算法把均值平摊给两半，让它们都尽可能小！
                     W_half1 = W_blk[:, perm[:half]]
                     W_half2 = W_blk[:, perm[half:]]
-                    mean_W = W_half1.sum(dim=1).abs().mean() + W_half2.sum(dim=1).abs().mean()
+                    mean_W = W_half1.sum(dim=1).pow(2).mean() + W_half2.sum(dim=1).pow(2).mean()
                     
                     if lambda_a > 0 and blk_act_mean is not None:
-                        act_1 = blk_act_mean[perm[:half]].sum().abs()
-                        act_2 = blk_act_mean[perm[half:]].sum().abs()
+                        act_1 = blk_act_mean[perm[:half]].sum().pow(2)
+                        act_2 = blk_act_mean[perm[half:]].sum().pow(2)
                         mean_A = act_1 + act_2
                     else:
                         mean_A = 0

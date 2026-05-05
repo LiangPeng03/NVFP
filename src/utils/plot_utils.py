@@ -18,7 +18,7 @@ class PreprocessingStatsCollector:
         X_mean: [in_features]
         """
         if module_name not in self.stats:
-            self.stats[module_name] = {p: {"col_means": [], "row_means": [], "col_vars": []} for p in ["Original", "Preprocessed", "Rotated"]}
+            self.stats[module_name] = {p: {"row_means": [], "max_abs": []} for p in ["Original", "Preprocessed", "Rotated"]}
         
         W = W.float().cpu()
         if X_mean is not None:
@@ -34,6 +34,10 @@ class PreprocessingStatsCollector:
         W_grouped = W[:, :num_groups * G].view(out_f, num_groups, G)
         row_group_means = W_grouped.mean(dim=2) # [out_features, num_groups]
         self.stats[module_name][phase]["row_means"].extend(row_group_means.flatten().tolist())
+        
+        # 2. Max absolute value (determines Quantization Scale!)
+        max_abs_vals = W_grouped.abs().max(dim=2).values
+        self.stats[module_name][phase]["max_abs"].extend(max_abs_vals.flatten().tolist())
 
     def plot_all(self, save_dir="./preprocessing_plots"):
         os.makedirs(save_dir, exist_ok=True)
@@ -53,10 +57,13 @@ class PreprocessingStatsCollector:
             plt.close()
             
             # Print Console Summary
-            raw_err = np.abs(phases["Original"]["row_means"]).mean()
-            prep_err = np.abs(phases["Preprocessed"]["row_means"]).mean()
-            rot_err = np.abs(phases["Rotated"]["row_means"]).mean()
+            raw_dc = np.abs(phases["Original"]["row_means"]).mean() if phases["Original"]["row_means"] else 0
+            prep_dc = np.abs(phases["Preprocessed"]["row_means"]).mean() if phases["Preprocessed"]["row_means"] else 0
             
-            imp_prep = (raw_err - prep_err) / (raw_err + 1e-8) * 100
-            imp_rot = (raw_err - rot_err) / (raw_err + 1e-8) * 100
-            print(f"| {mod:10} | Raw_Err: {raw_err:.4f} | Prep_Err: {prep_err:.4f} (Imp: {imp_prep:5.1f}%) | Rot_Err: {rot_err:.4f} (Imp: {imp_rot:5.1f}%) |")
+            raw_max = np.mean(phases["Original"]["max_abs"]) if phases["Original"]["max_abs"] else 0
+            rot_max = np.mean(phases["Rotated"]["max_abs"]) if phases["Rotated"]["max_abs"] else 0
+            
+            imp_dc = (raw_dc - prep_dc) / (raw_dc + 1e-8) * 100
+            imp_scale = (raw_max - rot_max) / (raw_max + 1e-8) * 100
+            
+            print(f"| {mod:10} | Raw DC: {raw_dc:.4f} -> Prep DC: {prep_dc:.4f} (Imp: {imp_dc:5.1f}%) | Raw Max: {raw_max:.4f} -> Rot Max: {rot_max:.4f} (Scale Imp: {imp_scale:5.1f}%) |")
