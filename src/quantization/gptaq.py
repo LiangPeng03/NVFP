@@ -333,54 +333,69 @@ def gptaq_quantization(
             in_features = W_fused.shape[1]
             perm_idx = torch.arange(in_features, device=W_fused.device)
             
-            w_mean = W_fused.mean(dim=0)
-            scores = lambda_w * w_mean + lambda_a * act_mean
+            # 必须用量化组的大小 (16/32) 来切分计算
+            G = getattr(args, "w_group_size", 16)
             
             for b_start in range(0, in_features, block_size):
                 b_end = min(b_start + block_size, in_features)
+                num_groups_in_blk = (b_end - b_start) // G
+                if num_groups_in_blk < 2: continue
                 
                 # 获取完整的权重块
                 W_blk = W_fused[:, b_start:b_end]
                 blk_act_mean = act_mean[b_start:b_end] if act_mean is not None else None
                 
-                blk_scores = scores[b_start:b_end].clone()
+                # 不使用 argsort 破坏自然分布，而是从原始状态开始优化
                 blk_perm = torch.arange(b_end - b_start, device=W_fused.device)
                 
-                half = (b_end - b_start) // 2
-                if half < 1: continue
+                for _ in range(max_iters):
+                    # 随机抽取两个不同的组
+                    g1_idx = torch.randint(0, num_groups_in_blk, (1,)).item()
+                    g2_idx = torch.randint(0, num_groups_in_blk, (1,)).item()
+                    while g1_idx == g2_idx:
+                        g2_idx = torch.randint(0, num_groups_in_blk, (1,)).item()
+                        
+                    # 在这两个组内各随机抽取一个通道
+                    c1_offset = torch.randint(0, G, (1,)).item()
+                    c2_offset = torch.randint(0, G, (1,)).item()
                     
-                blk_perm = torch.argsort(blk_scores)
-                
-                def calc_cost(perm):
-                    # 真正的行级优化：使用平方和（L2）惩罚。
-                    # 如果用绝对值(L1)，|r1| + |r2| 在符号相同时是一个常数，导致梯度为0（无法交换）。
-                    # 用平方和 r1^2 + r2^2 能强迫贪心算法把均值平摊给两半，让它们都尽可能小！
-                    W_half1 = W_blk[:, perm[:half]]
-                    W_half2 = W_blk[:, perm[half:]]
-                    mean_W = W_half1.sum(dim=1).pow(2).mean() + W_half2.sum(dim=1).pow(2).mean()
+                    idx1 = g1_idx * G + c1_offset
+                    idx2 = g2_idx * G + c2_offset
+                    
+                    # 提取这两个组的当前列索引
+                    perm_g1 = blk_perm[g1_idx * G : (g1_idx + 1) * G]
+                    perm_g2 = blk_perm[g2_idx * G : (g2_idx + 1) * G]
+                    
+                    # 计算交换前的局部 Cost (平方和惩罚)
+                    W_g1 = W_blk[:, perm_g1]
+                    W_g2 = W_blk[:, perm_g2]
+                    cost_w_old = W_g1.sum(dim=1).pow(2).mean() + W_g2.sum(dim=1).pow(2).mean()
+                    cost_old = lambda_w * cost_w_old
                     
                     if lambda_a > 0 and blk_act_mean is not None:
-                        act_1 = blk_act_mean[perm[:half]].sum().pow(2)
-                        act_2 = blk_act_mean[perm[half:]].sum().pow(2)
-                        mean_A = act_1 + act_2
-                    else:
-                        mean_A = 0
+                        act_old = blk_act_mean[perm_g1].sum().pow(2) + blk_act_mean[perm_g2].sum().pow(2)
+                        cost_old += lambda_a * act_old
                         
-                    return lambda_w * mean_W + lambda_a * mean_A
+                    # 执行交换
+                    blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2].clone(), blk_perm[idx1].clone()
                     
-                current_cost = calc_cost(blk_perm)
-                
-                for _ in range(max_iters):
-                    idx1 = torch.randint(0, half, (1,), device=W_fused.device)
-                    idx2 = torch.randint(half, b_end - b_start, (1,), device=W_fused.device)
+                    # 提取交换后的列索引
+                    perm_g1_new = blk_perm[g1_idx * G : (g1_idx + 1) * G]
+                    perm_g2_new = blk_perm[g2_idx * G : (g2_idx + 1) * G]
                     
-                    blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2], blk_perm[idx1].clone()
-                    new_cost = calc_cost(blk_perm)
+                    # 计算交换后的局部 Cost
+                    W_g1_new = W_blk[:, perm_g1_new]
+                    W_g2_new = W_blk[:, perm_g2_new]
+                    cost_w_new = W_g1_new.sum(dim=1).pow(2).mean() + W_g2_new.sum(dim=1).pow(2).mean()
+                    cost_new = lambda_w * cost_w_new
                     
-                    if new_cost < current_cost:
-                        current_cost = new_cost 
-                    else:
-                        blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2], blk_perm[idx1].clone()
+                    if lambda_a > 0 and blk_act_mean is not None:
+                        act_new = blk_act_mean[perm_g1_new].sum().pow(2) + blk_act_mean[perm_g2_new].sum().pow(2)
+                        cost_new += lambda_a * act_new
+                        
+                    # 如果没有变得更靠近 0，就回退交换
+                    if cost_new >= cost_old:
+                        blk_perm[idx1], blk_perm[idx2] = blk_perm[idx2].clone(), blk_perm[idx1].clone()
                 
                 perm_idx[b_start:b_end] = perm_idx[b_start + blk_perm]
                 
